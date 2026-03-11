@@ -406,3 +406,213 @@ def promedio_X(modelos):
 def comparar_con_baseline(X_bar, X_star):
     claves = set(X_bar.keys()) | set(X_star.keys())
     return {k: X_bar.get(k, 0.0) - X_star.get(k, 0.0) for k in claves}
+
+def build_matrices_from_gurobi(model, include_bounds=True, core_C_only=True,
+                               core_prefixes=('assign[', 'center[', 'centers_total')):
+    """
+    Extrae matrices del modelo Gurobi y construye:
+      - A_leq x <= b_leq  (todas las desigualdades normalizadas a '<=' + bounds opcionales)
+      - C x = d           (todas las igualdades, o solo el 'núcleo' si core_C_only=True)
+
+    Parámetros
+    ----------
+    include_bounds : bool
+        Si True, añade límites de variables (LB/UB) como filas en A_leq.
+    core_C_only : bool
+        Si True, C incluye solo igualdades con nombres que empiezan en core_prefixes.
+        Si False, C incluye todas las igualdades del modelo.
+    core_prefixes : tuple[str]
+        Prefijos para seleccionar el 'núcleo' de C cuando core_C_only=True.
+
+    Retorna
+    -------
+    A_leq : sp.csr_matrix 
+    b_leq : np.ndarray    
+    C     : sp.csr_matrix 
+    d     : np.ndarray   
+    meta  : dict          (metadatos útiles)
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from gurobipy import GRB
+
+    vars_   = model.getVars()
+    constrs = model.getConstrs()
+
+    var_names = [v.VarName for v in vars_]
+    cnames    = model.getAttr(GRB.Attr.ConstrName, constrs)
+    sense     = model.getAttr(GRB.Attr.Sense, constrs)   # '=', '<', '>', 'R'
+    rhs       = np.array(model.getAttr(GRB.Attr.RHS, constrs), dtype=float)
+
+    # Rangos si existen
+    try:
+        ranges = np.array(model.getAttr(GRB.Attr.Range, constrs), dtype=float)
+    except Exception:
+        ranges = np.zeros_like(rhs)
+
+    A_all = model.getA().tocsr()
+    m_all, n = A_all.shape
+
+    # Clasificación por tipo
+    idx_E = [i for i, s in enumerate(sense) if s == '=']
+    idx_L = [i for i, s in enumerate(sense) if s in ('<', 'L')]
+    idx_G = [i for i, s in enumerate(sense) if s in ('>', 'G')]
+    idx_R = [i for i, s in enumerate(sense) if s == 'R']
+
+    # ======================
+    #  C x = d
+    # ======================
+    if idx_E:
+        C_all = A_all[idx_E, :].tocsr()
+        d_all = rhs[idx_E].copy()
+        if core_C_only:
+            keep = [r for r, k in enumerate(idx_E)
+                    if cnames[idx_E[r]] and any(str(cnames[idx_E[r]]).startswith(p) for p in core_prefixes)]
+            C = C_all[keep, :].tocsr() if keep else sp.csr_matrix((0, n))
+            d = d_all[keep] if keep else np.zeros((0,), dtype=float)
+            kept_eq_global_idx = [idx_E[r] for r in keep]
+        else:
+            C = C_all
+            d = d_all
+            kept_eq_global_idx = idx_E[:]
+    else:
+        C = sp.csr_matrix((0, n))
+        d = np.zeros((0,), dtype=float)
+        kept_eq_global_idx = []
+
+    # ======================
+    #  A_leq x <= b_leq
+    # ======================
+    blocks, b_parts = [], []
+
+    if idx_L:
+        blocks.append(A_all[idx_L, :])
+        b_parts.append(rhs[idx_L])
+    if idx_G:
+        blocks.append(-A_all[idx_G, :])
+        b_parts.append(-rhs[idx_G])
+    if idx_R:
+        blocks.append(A_all[idx_R, :])
+        b_parts.append(rhs[idx_R])
+        blocks.append(-A_all[idx_R, :])
+        b_parts.append(-(rhs[idx_R] - ranges[idx_R]))
+
+    A_leq = sp.vstack(blocks, format='csr') if blocks else sp.csr_matrix((0, n))
+    b_leq = np.concatenate(b_parts) if b_parts else np.zeros((0,), dtype=float)
+
+    # --- incluir bounds ---
+    bound_row_start = A_leq.shape[0]
+    added_bound_rows = 0
+    if include_bounds:
+        bound_rows, bound_rhs = [], []
+        INF = 1e100
+        for j, v in enumerate(vars_):
+            if v.LB is not None and v.LB > -INF:
+                bound_rows.append(sp.csr_matrix(([-1.0], ([0], [j])), shape=(1, n)))
+                bound_rhs.append(-float(v.LB))
+            if v.UB is not None and v.UB < INF:
+                bound_rows.append(sp.csr_matrix(([1.0], ([0], [j])), shape=(1, n)))
+                bound_rhs.append(float(v.UB))
+        if bound_rows:
+            B = sp.vstack(bound_rows, format='csr')
+            A_leq = sp.vstack([A_leq, B], format='csr')
+            b_leq = np.concatenate([b_leq, np.array(bound_rhs, dtype=float)])
+            added_bound_rows = B.shape[0]
+
+    # --- mapeo fila original -> A_leq ---
+    row_map_leq = [None] * m_all
+    pos = 0
+    for k in range(m_all):
+        if sense[k] in ('<', 'L'):
+            row_map_leq[k] = pos; pos += 1
+    for k in range(m_all):
+        if sense[k] in ('>', 'G'):
+            row_map_leq[k] = pos; pos += 1
+    for k in range(m_all):
+        if sense[k] == 'R':
+            row_map_leq[k] = (pos, pos + 1); pos += 2
+
+    # --- meta ---
+    meta = dict(
+        var_names=var_names,
+        constr_names=list(cnames),
+        sense=list(sense),
+        idx_E=idx_E, idx_L=idx_L, idx_G=idx_G, idx_R=idx_R,
+        kept_eq_global_idx=kept_eq_global_idx,
+        row_map_leq=row_map_leq,
+        A_shape=A_all.shape, Aleq_shape=A_leq.shape, C_shape=C.shape,
+        bounds_added=added_bound_rows,
+        bounds_start=bound_row_start,
+    )
+
+    return A_leq, b_leq, C, d, meta
+
+def delta_b_from_eps(model, b_leq_ref, epsilon_ref, epsilon_new, meta):
+    """
+    Construye Δb para cambiar el ε de referencia (epsilon_ref) a un nuevo ε (epsilon_new).
+
+    En este modelo:
+        pop_up[j]:  sum_i p_i * x[i,j] <= phat * (1+ε) * y[j]
+        pop_lo[j]: -sum_i p_i * x[i,j] <= -phat * (1-ε) * y[j]
+
+    Como trabajamos con A_leq x <= b_leq, las filas correspondientes a estas
+    restricciones cambian solo en el término independiente (b_leq).
+
+    Al cambiar ε:
+        Δb_up_j = phat * (ε_new - ε_ref)
+        Δb_lo_j = phat * (ε_new - ε_ref)
+
+    Retorna:
+        delta : np.ndarray
+            Vector Δb del mismo tamaño que b_leq_ref.
+    """
+
+    cnames = meta["constr_names"]
+    row_map_leq = meta["row_map_leq"]
+
+    # 1) Detectar filas correspondientes a pop_up / pop_lo
+    pop_rows = []
+    for k, name in enumerate(cnames):
+        if not name:
+            continue
+        if name.startswith("pop_up[") or name.startswith("pop_lo["):
+            r = row_map_leq[k]
+            if r is not None:
+                pop_rows.append(r)
+
+    delta = np.zeros_like(b_leq_ref, dtype=float)
+
+    if not pop_rows:
+        print("No se detectaron restricciones nombradas como pop_up[...] / pop_lo[...].")
+        return delta
+
+    # 2) Estimar phat desde el modelo de referencia
+    pop_up_vals, pop_lo_vals = [], []
+    for k, name in enumerate(cnames):
+        if not name:
+            continue
+        r = row_map_leq[k]
+        if r is None:
+            continue
+        if name.startswith("pop_up["):
+            denom = 1.0 + float(epsilon_ref)
+            if abs(denom) > 1e-12:
+                pop_up_vals.append(float(b_leq_ref[r]) / denom)
+        elif name.startswith("pop_lo["):
+            denom = 1.0 - float(epsilon_ref)
+            if abs(denom) > 1e-12:
+                pop_lo_vals.append(-float(b_leq_ref[r]) / denom)
+
+    cand = []
+    if pop_up_vals:
+        cand.append(np.median(pop_up_vals))
+    if pop_lo_vals:
+        cand.append(np.median(pop_lo_vals))
+    phat_est = float(np.median(cand)) if cand else 0.0
+
+    # 3) Calcular Δb
+    delta_val = phat_est * (float(epsilon_new) - float(epsilon_ref))
+    for r in pop_rows:
+        delta[r] = delta_val
+
+    return delta
