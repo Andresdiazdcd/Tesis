@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from gurobipy import GRB
 import os, re, json
 
-from sampleos import systematic_sampling, pivotal_sampling
+from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
 
 # En este archivo estarán las funciones útiles para trabajar
 # Leer datos, ordenar datos, grafos, etc
@@ -220,8 +220,10 @@ def resultados_sampleo(modelo, k, n, metodo='systematic'):
             seleccionados = systematic_sampling(comunas, probabilidades, comunas_a_samplear)
         elif metodo == 'pivotal':
             seleccionados = pivotal_sampling(comunas, probabilidades)
+        elif metodo == 'sampford':
+            seleccionados = sampford_sampling(comunas, probabilidades, comunas_a_samplear)
         else:
-            raise ValueError("Método no reconocido. Usa 'systematic' o 'pivotal'.")
+            raise ValueError("Método no reconocido. Usa 'systematic', 'pivotal' o 'Sampford'.")
 
         sampleos.append(seleccionados)
 

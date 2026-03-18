@@ -110,3 +110,43 @@ def pivotal_sampling(elements, probabilities):
             muestra.append(elements_iter[i])
 
     return muestra
+
+def weighted_choice(elements, weights):
+    total = sum(weights)
+    u = random.uniform(0, total)
+
+    acumulado = 0
+    for e, w in zip(elements, weights):
+        acumulado += w
+        if u <= acumulado:
+            return e
+
+    return elements[-1]
+
+
+def sampford_sampling(elements, probabilities, k):
+
+    while True:
+
+        sampleo = []
+
+        # Paso 1: elegir i1 proporcional a p_i
+        i1 = weighted_choice(elements, probabilities)
+        sampleo.append(i1)
+
+        # Paso 2: pesos p_i / (1 - p_i)
+        pesos = []
+        for p in probabilities:
+            if round(1 - p, 12) == 0:
+                pesos.append(float("inf"))
+            else:
+                pesos.append(p / (1 - p))
+
+        # Seleccionar k-1 con reemplazo
+        for _ in range(k - 1):
+            elegido = weighted_choice(elements, pesos)
+            sampleo.append(elegido)
+
+        # Paso 3: aceptar si todos distintos
+        if len(set(sampleo)) == k:
+            return sampleo
