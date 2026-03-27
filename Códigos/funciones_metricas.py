@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from collections import Counter
+from collections import defaultdict, Counter
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
 def ari(labels1, labels2):
@@ -55,3 +55,46 @@ def matriz_metricas(mapas, metrica="ari"):
                 M[i, j] = variation_of_information(labels_i, labels_j)
 
     return pd.DataFrame(M, index=nombres, columns=nombres)
+
+def comunas_inestables(mapas):
+    nombres = sorted(mapas.keys())
+    n = len(mapas[nombres[0]])
+
+    cambios = defaultdict(list)
+
+    for idx in range(n):
+        labels = [mapas[n][idx] for n in nombres]
+        conteo = Counter(labels)
+
+        if len(conteo) > 1:
+            cambios[idx] = dict(conteo)
+
+    return cambios
+
+def estabilidad_comuna(mapas):
+    nombres = sorted(mapas.keys())
+    n = len(mapas[nombres[0]])
+
+    estabilidad = []
+
+    for idx in range(n):
+        labels = [mapas[n][idx] for n in nombres]
+        conteo = Counter(labels)
+        max_prop = max(conteo.values()) / len(labels)
+        estabilidad.append(max_prop)
+
+    return estabilidad
+
+def comunas_inestables_nombres(mapas, comunas):
+    nombres = sorted(mapas.keys())
+
+    resultado = {}
+
+    for idx, comuna in enumerate(comunas):
+        labels = [mapas[n][idx] for n in nombres]
+        conteo = Counter(labels)
+
+        if len(conteo) > 1:
+            resultado[comuna] = dict(conteo)
+
+    return resultado
