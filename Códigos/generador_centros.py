@@ -6,7 +6,7 @@ import time, json, os, re
 import scipy.sparse as sp
 import gurobipy as gp
 from gurobipy import GRB
-
+import sys
 from funciones import (obtener_comunas, dist, obtener_region, resultados_sampleo, ensure_dir,
                        safe_attr, parse_x_name, extraer_y_guardar_modelo, matriz_X_desde_modelo,
                        promedio_X, comparar_con_baseline, build_matrices_from_gurobi, delta_b_from_eps)
@@ -23,6 +23,7 @@ from funciones import extraer_prob_centros
 from itertools import combinations
 from tqdm import tqdm
 import time
+from funciones_guardado import guardar_resultado_factible
 
 comunas = pd.read_excel('DataChile/comunas.xlsx')
 distancias = pd.read_excel('DataChile/distancias.xlsx')
@@ -68,9 +69,14 @@ for comuna in R:
     # Agregar la comuna a la lista de comunas de la región
     comunas_por_region[region].append(comuna)
 
-modelo_con_limite = modelo_con_limite(0.8398, R, 28, dict_s, comunas)
+K_centros = 28
+
+TIPO_MODELO = "CON_LIMITE"
+modelo_con_limite = modelo_con_limite(0.8398, R, K_centros, dict_s, comunas)
 
 count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo_con_limite, 28)
+
+print(f"Centros fijados por modelo: {count_centros_fijados}")
 
 def centros_fijados(modelo):
     centros = []
@@ -83,43 +89,57 @@ def centros_fijados(modelo):
 
 centros_fijados = centros_fijados(modelo_con_limite)
 
-t_mapas = 8000
+
+print(f"Centros fijados por modelo check 1: {len(centros_fijados)}")
 
 comunas_t, probabilidades = zip(*centros_frac)
 comunas_t = list(comunas_t)
 probabilidades = list(probabilidades)
 
-
-TIEMPO_MAX = 20 * 60 * 60   # 20 horas en segundos
+HORAS = 20
+TIEMPO_MAX = HORAS * 60   # 20 horas en segundos
 t_inicio = time.time()
 
 modelos_factibles = []
 centros_factibles = []
 
-centros_i_unicos = list(combinations(comunas_t, 6))
+centros_i_unicos = list(combinations(comunas_t, K_centros - len(centros_fijados)))
+print(f"Centros a samplear: { K_centros - len(centros_fijados)}\n")
 print(f"Total de combinaciones a evaluar: {len(centros_i_unicos)}")
 
-epsilon_1 = 0.9
+epsilon_1 = 0.87
 
-for centros_i in tqdm(centros_i_unicos, desc="Buscando modelos factibles"):
+error = False
+
+
+pbar = tqdm(centros_i_unicos, desc="Buscando modelos factibles")
+
+for centros_i in pbar:
 
     # chequeo de tiempo
     tiempo_transcurrido = time.time() - t_inicio
     if tiempo_transcurrido >= TIEMPO_MAX:
-        print(" Límite de 3 horas alcanzado.")
+        print(f" Límite de {HORAS} horas alcanzado.")
         break
 
     centros_total_i = centros_fijados + list(centros_i)
 
+
+    if len(centros_total_i) != K_centros:
+        print("Error número de centros - se termina flujo")
+        error = True
+        sys.exit()
+
     modelo_i = modelo_centros_fijos_con_limite(
         epsilon_1, R, centros_total_i, dict_s, comunas, verbose=False
     )
+    modelo_i.setParam("OutputFlag", 0)
 
     # almacenar solo si es factible
     if modelo_i:
         modelos_factibles.append(modelo_i)
         centros_factibles.append(centros_total_i)
-        print(f'Factibles encontrados hasta ahora: {len(modelos_factibles)}')
+        pbar.set_postfix({"factibles": len(modelos_factibles)})
 
 tiempo_total = time.time() - t_inicio
 horas = int(tiempo_total // 3600)
@@ -130,10 +150,22 @@ print("Cantidad de modelos factibles encontrados:", len(modelos_factibles))
 print(f"Tiempo total de ejecución: {horas}h {minutos}m {segundos}s")
 
 # guardar centros factibles en .txt
-ruta_salida = f"centros_factibles_epsilon_{epsilon_1}.txt"
+base_resultados = f"resultados_factibles_{TIPO_MODELO}_epsilon_{epsilon_1}"
 
-with open(ruta_salida, "w", encoding="utf-8") as f:
-    for centros in centros_factibles:
-        f.write(",".join(centros) + "\n")
+for idx, (modelo, centros) in enumerate(zip(modelos_factibles, centros_factibles), start=1):
+    nombre_resultado = f"t_{idx:03d}"
 
-print(f"Centros guardados en {ruta_salida}")
+    metadata = {
+        "epsilon": epsilon_1,
+        "K_centros": K_centros,
+        "cantidad_centros": len(centros)
+    }
+
+    guardar_resultado_factible(
+        base_resultados,
+        nombre_resultado,
+        modelo,
+        centros,
+        metadata=metadata
+    )
+print(f"Centros guardados en {base_resultados}")

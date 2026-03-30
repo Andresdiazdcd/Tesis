@@ -17,6 +17,8 @@ from collections import defaultdict
 
 def modelo_con_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Con Límite Regional")
+    model.setParam("Method", 4)
+    model.setParam("Threads", 8)
 
     phat = calcular_poblacion_total(comunas, R) / K
 
@@ -169,6 +171,9 @@ def modelo_relajado_2(epsilon, R, K, comunas):
 
 def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
+
+    model.setParam("Method", 4)
+    model.setParam("Threads", 8)
     start_time = time.time()
     print("La cantidad de centros es",K )
     #Se calcula la población promedio
@@ -549,6 +554,8 @@ def modelo_sin_limite_1(epsilon, R, K, dict_s, comunas):
 # C: centros
 def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True):
     model = Model("Modelo")
+    model.setParam("Method", 4)
+    model.setParam("Threads", 8)
 
     if verbose:
         model.Params.LogToConsole = 1
@@ -559,7 +566,7 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
     # addVars() - setObjective() - addConstr() - optimize() - status()
 
     start_time = time.time()
-    print("La cantidad de centros es", len(C))
+    #print("La cantidad de centros es", len(C))
     # Se calcula la población promedio
     phat = calcular_poblacion_total(comunas, R)/len(C)
 
@@ -608,7 +615,7 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
     # Si es que el modelo es factible, se imprimen algunos resultados.
     if model.status == GRB.Status.OPTIMAL:
         duration = end_time - start_time
-        print(f"El código se ejecutó en {duration:.2f} segundos")
+    #    print(f"El código se ejecutó en {duration:.2f} segundos")
     #    asignacion = []
     #    asignacion_value=[]
     #    for i in model.getVars():
@@ -619,7 +626,8 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
     #          asignacion_value.append(i.VarName)
     #          asignacion_value.append(i.x)
     else:
-        print("El modelo es infactible")
+        pass
+        #print("El modelo es infactible")
 
     # COMO EL MODELO ES UNA FUNCIÓN SE ENTREGAN ALGUNOS RETURN PARA OCUPARLOS POSTERIORMENTE
     if model.status == GRB.Status.OPTIMAL:
@@ -630,6 +638,8 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
 # ep = 0.6796875
 def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas):
     model = Model("Modelo 1")
+    model.setParam("Method", 4)
+    model.setParam("Threads", 8)
     start_time = time.time()
     print("La cantidad de centros es", len(C))
     #Se calcula la población promedio
