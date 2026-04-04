@@ -636,10 +636,15 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
         return False
     
 # ep = 0.6796875
-def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas):
+def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas, verbose = True):
     model = Model("Modelo 1")
     model.setParam("Method", 4)
     model.setParam("Threads", 8)
+
+    if verbose:
+        model.Params.LogToConsole = 1
+    else:
+        model.Params.LogToConsole = 0
     start_time = time.time()
     print("La cantidad de centros es", len(C))
     #Se calcula la población promedio
