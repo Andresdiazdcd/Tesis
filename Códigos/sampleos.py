@@ -12,6 +12,7 @@ from itertools import islice, accumulate
 
 def systematic_sampling(elements, probabilities, k):
 
+    # funciona si sabemos que sum(probabilidades) == k
     probabilidades = [0] + probabilities
 
     n = len(elements)

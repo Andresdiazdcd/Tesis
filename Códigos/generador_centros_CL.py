@@ -13,7 +13,7 @@ from funciones import (obtener_comunas, dist, obtener_region, resultados_sampleo
 
 from DataChile.chile_data import regiones
 
-from modelos import modelo_con_limite, modelo_centros_fijos_con_limite, modelo_relajado, modelo_relajado_2, modelo_sin_limite
+from modelos import modelo_con_limite, modelo_centros_fijos_con_limite
 
 
 from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
@@ -73,7 +73,7 @@ for comuna in R:
 K_centros = 28
 
 TIPO_MODELO = "CL" # CON LIMITE
-METODO = "SYS" # Systematic
+METODO = "PIVOTAL" # Systematic
 modelo_con_limite = modelo_con_limite(0.8398, R, K_centros, dict_s, comunas)
 
 count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo_con_limite, 28)
@@ -98,20 +98,19 @@ comunas_t = list(comunas_t)
 probabilidades = list(probabilidades)
 
 HORAS = 20
-TIEMPO_MAX = HORAS * 60 * 60   # 20 horas en segundos
+TIEMPO_MAX = HORAS * 60 * 60
 t_inicio = time.time()
 
-epsilon_1 = 0.89
+epsilon_1 = 0.87
 t_mapas = 100
 k_sampleo = K_centros - len(centros_fijados)
 
-
-k_sampleo = K_centros - len(centros_fijados)
 n = len(comunas_t)
-
 total_combinaciones = math.comb(len(comunas_t), k_sampleo)
 
 print(f"Centros a samplear: {k_sampleo}")
+print(f"Cantidad de comunas fraccionarias: {n}")
+print(f"Total combinaciones teóricas: {total_combinaciones}")
 print(f"Meta de mapas factibles a guardar: {t_mapas}")
 
 BASE_RESULTADOS = "resultados"
@@ -133,75 +132,142 @@ centros_infactibles = []
 centros_factibles_set = set()
 centros_infactibles_set = set()
 
+# todas las combinaciones distintas observadas por el sampleo
+centros_observados_set = set()
+
 intentos = 0
 repetidos = 0
+repetidos_consecutivos = 0
 errores_gurobi = 0
 errores_otro_tipo = 0
 
-LOG_CADA = 10
+LOG_CADA = 50
+MAX_REPETIDOS_CONSECUTIVOS = 5000
+PREMUESTREO_MUESTRAS = 10000
+
+
+def log_mensaje(mensaje, consola=True, archivo=True, overwrite=False):
+    if consola:
+        if overwrite:
+            print(mensaje, end="\r", flush=True)
+        else:
+            print(mensaje, flush=True)
+
+    if archivo:
+        with open(ruta_log, "a", encoding="utf-8") as f_log:
+            f_log.write(mensaje + "\n")
+
+
+def estado_actual():
+    exploradas = len(centros_factibles_set) + len(centros_infactibles_set)
+    porcentaje_explorado = 100 * exploradas / total_combinaciones if total_combinaciones > 0 else 0
+    porcentaje_observado = 100 * len(centros_observados_set) / total_combinaciones if total_combinaciones > 0 else 0
+
+    return (
+        f"[{time.strftime('%H:%M:%S')}] "
+        f"intentos={intentos} | "
+        f"obs_distintas={len(centros_observados_set)}/{total_combinaciones} ({porcentaje_observado:.2f}%) | "
+        f"exploradas={exploradas}/{total_combinaciones} ({porcentaje_explorado:.2f}%) | "
+        f"factibles={len(centros_factibles)} | "
+        f"infactibles={len(centros_infactibles)} | "
+        f"repetidos={repetidos} | "
+        f"rep_cons={repetidos_consecutivos}"
+    )
+
 
 with open(ruta_log, "w", encoding="utf-8") as f_log:
     f_log.write(f"Inicio corrida: {time.ctime()}\n")
     f_log.write(f"TIPO_MODELO = {TIPO_MODELO}\n")
+    f_log.write(f"METODO = {METODO}\n")
     f_log.write(f"epsilon_1 = {epsilon_1}\n")
     f_log.write(f"K_centros = {K_centros}\n")
     f_log.write(f"centros_fijados = {len(centros_fijados)}\n")
     f_log.write(f"centros_a_samplear = {k_sampleo}\n")
+    f_log.write(f"comunas_fraccionarias = {n}\n")
+    f_log.write(f"total_combinaciones_teoricas = {total_combinaciones}\n")
     f_log.write(f"t_mapas_objetivo = {t_mapas}\n\n")
 
+# ---------------------------------
+# PREMUESTREO DIAGNÓSTICO
+# ---------------------------------
+vistos_premuestreo = set()
+
+for _ in range(PREMUESTREO_MUESTRAS):
+    centros_i = pivotal_sampling(comunas_t, probabilidades)#, k_sampleo)
+    vistos_premuestreo.add(tuple(sorted(centros_i)))
+
+mensaje = (
+    f"Premuestreo {METODO}: {len(vistos_premuestreo)} combinaciones distintas "
+    f"observadas en {PREMUESTREO_MUESTRAS} sampleos "
+    f"(sobre {total_combinaciones} teóricas)"
+)
+log_mensaje(mensaje, consola=True, archivo=True, overwrite=False)
+
+# ---------------------------------
+# LOOP PRINCIPAL
+# ---------------------------------
 while len(centros_factibles) < t_mapas:
 
-    if len(centros_factibles_set) + len(centros_infactibles_set) == total_combinaciones:
-        print("Se exploraron todas las combinaciones posibles.")
+    exploradas = len(centros_factibles_set) + len(centros_infactibles_set)
+
+    if exploradas == total_combinaciones:
+        print()
+        log_mensaje("Se exploraron todas las combinaciones posibles.", consola=True, archivo=True)
         break
 
     tiempo_transcurrido = time.time() - t_inicio
     if tiempo_transcurrido >= TIEMPO_MAX:
-        mensaje = f"Límite de {HORAS} horas alcanzado."
-        print(mensaje)
-        with open(ruta_log, "a", encoding="utf-8") as f_log:
-            f_log.write(mensaje + "\n")
-            f_log.write(f"Límite de tiempo alcanzado en intento {intentos}\n")
+        print()
+        log_mensaje(f"Límite de {HORAS} horas alcanzado.", consola=True, archivo=True)
+        log_mensaje(f"Límite de tiempo alcanzado en intento {intentos}", consola=False, archivo=True)
+        break
+
+    if repetidos_consecutivos >= MAX_REPETIDOS_CONSECUTIVOS:
+        print()
+        log_mensaje(
+            f"Se detiene por estancamiento: {repetidos_consecutivos} repetidos consecutivos.",
+            consola=True,
+            archivo=True
+        )
         break
 
     intentos += 1
 
     try:
-        centros_i = systematic_sampling(comunas_t, probabilidades, k_sampleo)
+        centros_i = pivotal_sampling(comunas_t, probabilidades)#, k_sampleo)
         centros_i_key = tuple(sorted(centros_i))
 
-        # skip si ya fue visto antes, sea factible o infactible
+        centros_observados_set.add(centros_i_key)
+
+        # skip si ya fue visto antes y ya fue evaluado
         if centros_i_key in centros_factibles_set or centros_i_key in centros_infactibles_set:
             repetidos += 1
+            repetidos_consecutivos += 1
 
             if intentos % LOG_CADA == 0:
-                mensaje = (
-                    f"[{time.strftime('%H:%M:%S')}] "
-                    f"intentos={intentos} | "
-                    f"factibles={len(centros_factibles)} | "
-                    f"infactibles={len(centros_infactibles)} | "
-                    f"repetidos={repetidos}"
-                )
-                print(mensaje)
-                with open(ruta_log, "a", encoding="utf-8") as f_log:
-                    f_log.write(mensaje + "\n")
+                mensaje_estado = estado_actual()
+                log_mensaje(mensaje_estado, consola=True, archivo=True, overwrite=True)
 
             continue
+
+        repetidos_consecutivos = 0
 
         centros_total_i = centros_fijados + list(centros_i)
 
         if len(centros_total_i) != K_centros:
-            mensaje = f"[ERROR] Número de centros incorrecto en intento {intentos}: {len(centros_total_i)}"
-            print(mensaje)
-            with open(ruta_log, "a", encoding="utf-8") as f_log:
-                f_log.write(mensaje + "\n")
+            print()
+            log_mensaje(
+                f"[ERROR] Número de centros incorrecto en intento {intentos}: {len(centros_total_i)}",
+                consola=True,
+                archivo=True
+            )
             continue
 
         modelo_i = modelo_centros_fijos_con_limite(
             epsilon_1, R, centros_total_i, dict_s, comunas, verbose=False
         )
 
-        # si el modelo retorna None / False / no factible
+        # INFATIBLE
         if not modelo_i:
             centros_infactibles.append(centros_total_i)
             centros_infactibles_set.add(centros_i_key)
@@ -209,32 +275,13 @@ while len(centros_factibles) < t_mapas:
             with open(ruta_centros_infactibles, "a", encoding="utf-8") as f:
                 f.write(",".join(centros_total_i) + "\n")
 
-            mensaje = (
-                f"[INFACITBLE] intento={intentos} | "
-                f"factibles={len(centros_factibles)} | "
-                f"infactibles={len(centros_infactibles)} | "
-                f"repetidos={repetidos}"
-            )
-            print(mensaje)
-
-            with open(ruta_log, "a", encoding="utf-8") as f_log:
-                f_log.write(mensaje + "\n")
-
             if intentos % LOG_CADA == 0:
-                mensaje_log = (
-                    f"[{time.strftime('%H:%M:%S')}] "
-                    f"intentos={intentos} | "
-                    f"factibles={len(centros_factibles)} | "
-                    f"infactibles={len(centros_infactibles)} | "
-                    f"repetidos={repetidos}"
-                )
-                print(mensaje_log)
-                with open(ruta_log, "a", encoding="utf-8") as f_log:
-                    f_log.write(mensaje_log + "\n")
+                mensaje_estado = estado_actual()
+                log_mensaje(mensaje_estado, consola=True, archivo=True, overwrite=True)
 
             continue
 
-        # si llegó acá, el modelo fue factible
+        # FACTIBLE
         centros_factibles.append(centros_total_i)
         centros_factibles_set.add(centros_i_key)
 
@@ -248,7 +295,7 @@ while len(centros_factibles) < t_mapas:
             "K_centros": K_centros,
             "cantidad_centros": len(centros_total_i),
             "intento": intentos,
-            "metodo_sampleo": "systematic"
+            "metodo_sampleo": {METODO}
         }
 
         guardar_resultado_factible(
@@ -259,71 +306,80 @@ while len(centros_factibles) < t_mapas:
             metadata=metadata
         )
 
-        mensaje = (
-            f"[OK] {nombre_resultado} | "
-            f"intento={intentos} | "
+        print()
+        log_mensaje(
+            f"[OK] {nombre_resultado} | intento={intentos} | "
             f"factibles={len(centros_factibles)} | "
             f"infactibles={len(centros_infactibles)} | "
-            f"repetidos={repetidos}"
+            f"obs_distintas={len(centros_observados_set)} | "
+            f"repetidos={repetidos}",
+            consola=True,
+            archivo=True
         )
-        print(mensaje)
-
-        with open(ruta_log, "a", encoding="utf-8") as f_log:
-            f_log.write(mensaje + "\n")
 
         if intentos % LOG_CADA == 0:
-            mensaje_log = (
-                f"[{time.strftime('%H:%M:%S')}] "
-                f"intentos={intentos} | "
-                f"factibles={len(centros_factibles)} | "
-                f"infactibles={len(centros_infactibles)} | "
-                f"repetidos={repetidos}"
-            )
-            print(mensaje_log)
-            with open(ruta_log, "a", encoding="utf-8") as f_log:
-                f_log.write(mensaje_log + "\n")
+            mensaje_estado = estado_actual()
+            log_mensaje(mensaje_estado, consola=True, archivo=True, overwrite=True)
 
     except gp.GurobiError as e:
         errores_gurobi += 1
-        mensaje = f"[GUROBI ERROR] intento={intentos} | código={getattr(e, 'errno', 'NA')} | mensaje={str(e)}"
-        print(mensaje)
-        with open(ruta_log, "a", encoding="utf-8") as f_log:
-            f_log.write(mensaje + "\n")
+        print()
+        log_mensaje(
+            f"[GUROBI ERROR] intento={intentos} | código={getattr(e, 'errno', 'NA')} | mensaje={str(e)}",
+            consola=True,
+            archivo=True
+        )
         continue
 
     except Exception as e:
         errores_otro_tipo += 1
-        mensaje = f"[ERROR GENERAL] intento={intentos} | mensaje={str(e)}"
-        print(mensaje)
-        with open(ruta_log, "a", encoding="utf-8") as f_log:
-            f_log.write(mensaje + "\n")
+        print()
+        log_mensaje(
+            f"[ERROR GENERAL] intento={intentos} | mensaje={str(e)}",
+            consola=True,
+            archivo=True
+        )
         continue
+
+# limpiar línea dinámica
+print()
 
 tiempo_total = time.time() - t_inicio
 horas = int(tiempo_total // 3600)
 minutos = int((tiempo_total % 3600) // 60)
 segundos = int(tiempo_total % 60)
 
-print("\nResumen final")
+exploradas = len(centros_factibles_set) + len(centros_infactibles_set)
+porcentaje_explorado = 100 * exploradas / total_combinaciones if total_combinaciones > 0 else 0
+porcentaje_observado = 100 * len(centros_observados_set) / total_combinaciones if total_combinaciones > 0 else 0
+
+print("Resumen final")
 print(f"Mapas factibles guardados: {len(centros_factibles)}")
 print(f"Combinaciones infactibles detectadas: {len(centros_infactibles)}")
+print(f"Combinaciones distintas observadas por el sampleo: {len(centros_observados_set)}")
 print(f"Intentos totales: {intentos}")
 print(f"Repetidos saltados: {repetidos}")
+print(f"Repetidos consecutivos al cierre: {repetidos_consecutivos}")
 print(f"Errores Gurobi: {errores_gurobi}")
 print(f"Otros errores: {errores_otro_tipo}")
 print(f"Tiempo total de ejecución: {horas}h {minutos}m {segundos}s")
 print(f"Resultados guardados en {base_resultados}")
-
-print(f"Total combinaciones posibles: {total_combinaciones}")
-print(f"Exploradas: {len(centros_factibles_set) + len(centros_infactibles_set)}")
+print(f"Total combinaciones teóricas: {total_combinaciones}")
+print(f"Porcentaje observado por sampleo: {porcentaje_observado:.2f}%")
+print(f"Porcentaje explorado: {porcentaje_explorado:.2f}%")
 
 with open(ruta_log, "a", encoding="utf-8") as f_log:
     f_log.write("\nResumen final\n")
     f_log.write(f"Mapas factibles guardados: {len(centros_factibles)}\n")
     f_log.write(f"Combinaciones infactibles detectadas: {len(centros_infactibles)}\n")
+    f_log.write(f"Combinaciones distintas observadas por el sampleo: {len(centros_observados_set)}\n")
     f_log.write(f"Intentos totales: {intentos}\n")
     f_log.write(f"Repetidos saltados: {repetidos}\n")
+    f_log.write(f"Repetidos consecutivos al cierre: {repetidos_consecutivos}\n")
     f_log.write(f"Errores Gurobi: {errores_gurobi}\n")
     f_log.write(f"Otros errores: {errores_otro_tipo}\n")
     f_log.write(f"Tiempo total: {horas}h {minutos}m {segundos}s\n")
+    f_log.write(f"Total combinaciones teóricas: {total_combinaciones}\n")
+    f_log.write(f"Porcentaje observado por sampleo: {porcentaje_observado:.2f}%\n")
+    f_log.write(f"Porcentaje explorado: {porcentaje_explorado:.2f}%\n")
     f_log.write(f"Fin corrida: {time.ctime()}\n")

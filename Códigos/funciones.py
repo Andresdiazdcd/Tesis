@@ -97,22 +97,22 @@ def Snuevo(grafo_adyacencia, V,u,v):
       else:
           return []
       
-def extraer_prob_centros(modelo, K):
+def extraer_prob_centros(modelo, K, valores):
     centros_frac = []
     centros = []
     count_centros_fijados = 0
     
-    
     for v in modelo.getVars():
-        if v.VarName.startswith("centros_j") and v.x == 1.0:
+        if v.VarName.startswith("centros_j") and valores[v.VarName] == 1.0:
             texto_1 = v.VarName
             comuna = texto_1[texto_1.find('[')+1 : texto_1.find(']')]
             centros.append(comuna)
             count_centros_fijados += 1
-        elif v.VarName.startswith("centros_j") and v.x > 0.0 and v.x < 1.0:
+
+        elif v.VarName.startswith("centros_j") and valores[v.VarName] > 0.0 and valores[v.VarName] < 1.0:
             texto_1 = v.VarName
             comuna = texto_1[texto_1.find('[')+1 : texto_1.find(']')]
-            centros_frac.append((comuna, v.x))
+            centros_frac.append((comuna, valores[v.VarName]))
 
     top_centros_frac = sorted(centros_frac, key=lambda x: x[1], reverse=True)[0:(K-count_centros_fijados)]
     

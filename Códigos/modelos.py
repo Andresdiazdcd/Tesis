@@ -12,13 +12,75 @@ from openpyxl import load_workbook
 import scipy as sp
 from collections import defaultdict
 
+def modelo_con_limite_con_obj(epsilon, R, K, dict_s, comunas, dist_dict):
+    model = Model("Modelo Con Límite Regional")
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
+
+    phat = calcular_poblacion_total(comunas, R) / K
+
+    # Variables
+    x = model.addVars([(i, j) for i in R for j in R], vtype=GRB.CONTINUOUS, name="asignaciones_ij")
+    y = model.addVars(R, vtype=GRB.CONTINUOUS, name="centros_j")
+
+    # esto no optimiza nada, solamente ve si hay factibilidad y encuentra solución
+    model.setObjective(
+    quicksum(dist_dict[(i, j)] * x[i, j] for i in R for j in R),
+    GRB.MINIMIZE
+)
+
+    # Restricciones
+    # si no es la misma región, no se puede asignar
+    for i in R:
+        for j in R:
+            if obtener_region(comunas, i) != obtener_region(comunas, j):
+                model.addConstr(x[i, j] == 0, name=f"block[{i},{j}]")
+
+    # Balance poblacional 
+    for j in R:
+        model.addConstr(quicksum(pob(comunas, i) * x[i, j] for i in R) <= phat * (1 + epsilon) * y[j],
+                        name=f"pop_up[{j}]")
+        model.addConstr(quicksum(pob(comunas, i) * x[i, j] for i in R) >= phat * (1 - epsilon) * y[j],
+                        name=f"pop_lo[{j}]")
+        model.addConstr(x[j, j] == y[j], name=f"center[{j}]")
+
+    # aseguramos la cantidad de centros
+    model.addConstr(quicksum(y[j] for j in R) == K, name="centers_total")
+
+    # Cada comuna debe ser asignada completamente a algún centro
+    for i in R:
+        model.addConstr(quicksum(x[i, j] for j in R) == 1, name=f"assign[{i}]")
+        for j in R:
+            model.addConstr(x[i, j] <= y[j], name=f"link[{i},{j}]")
+
+            # Restricción de contigüidad
+            if obtener_region(comunas, i) == obtener_region(comunas, j):
+                aux_s = dict_s[(j, i)]
+                while not aux_s == [[]]:
+                    for k in aux_s:
+                        model.addConstr(quicksum(x[k[0], j] for k in aux_s) >= x[i, j],
+                                        name=f"path[{i},{j},{k[0]}]")
+                        aux_s = dict_s[(j, k[0])]
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        resultado = []
+        for j in R:
+            valor = y[j].x
+            if valor > 0:
+                resultado.append((j, valor))
+                print(f"{j}: {valor:.4f}")
+        return model
+    else:
+        print("Modelo infactible")
+        return None
 
 
 
 def modelo_con_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Con Límite Regional")
-    model.setParam("Method", 4)
-    model.setParam("Threads", 8)
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
 
     phat = calcular_poblacion_total(comunas, R) / K
 
@@ -123,57 +185,11 @@ def modelo_relajado(epsilon, R, K, comunas, y_star):
         print("Modelo relajado infactible")
         return None
 
-
-def modelo_relajado_2(epsilon, R, K, comunas):
-
-    model = Model("modelo_relajado")
-    model.Params.OutputFlag = 0
-
-    phat = calcular_poblacion_total(comunas, R) / K
-
-    # Variables
-    z = model.addVars([(i, j) for i in R for j in R],
-                      vtype=GRB.CONTINUOUS, lb=0.0, name="z")
-    y = model.addVars(R, vtype=GRB.CONTINUOUS, lb=0.0, ub=1.0, name="y")
-
-    # Objetivo
-    model.setObjective(0, GRB.MINIMIZE)
-
-    # Asignación completa
-    for i in R: model.addConstr(quicksum(z[i, j] for j in R) == 1,
-                                name=f"assign[{i}]")
-
-    # Balance poblacional
-    for j in R:
-        model.addConstr( quicksum(pob(comunas, i) * z[i, j] for i in R) <= phat * (1 + epsilon) * y[j],
-                                name=f"pop_up[{j}]" )
-        model.addConstr( quicksum(pob(comunas, i) * z[i, j] for i in R) >= phat * (1 - epsilon) * y[j],
-                        name=f"pop_lo[{j}]" )
-        model.addConstr(z[j, j] == y[j], name=f"center[{j}]")
-
-    # Cantidad de centros
-    model.addConstr(quicksum(y[j] for j in R) == K,
-                    name="centers_total")
-
-    # z_ij \leq y_j
-    for i in R:
-        for j in R: model.addConstr(z[i, j] <= y[j],
-                                    name=f"link[{i},{j}]")
-            
-    model.optimize()
-    
-    if model.status == GRB.Status.OPTIMAL:
-        print("Modelo relajado factible")
-        return model
-    else: 
-        print("Modelo relajado infactible")
-        return None
-
 def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
 
-    model.setParam("Method", 4)
-    model.setParam("Threads", 8)
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
     start_time = time.time()
     print("La cantidad de centros es",K )
     #Se calcula la población promedio
@@ -554,8 +570,8 @@ def modelo_sin_limite_1(epsilon, R, K, dict_s, comunas):
 # C: centros
 def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True):
     model = Model("Modelo")
-    model.setParam("Method", 4)
-    model.setParam("Threads", 8)
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
 
     if verbose:
         model.Params.LogToConsole = 1
@@ -638,8 +654,8 @@ def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True
 # ep = 0.6796875
 def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas, verbose = True):
     model = Model("Modelo 1")
-    model.setParam("Method", 4)
-    model.setParam("Threads", 8)
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
 
     if verbose:
         model.Params.LogToConsole = 1
