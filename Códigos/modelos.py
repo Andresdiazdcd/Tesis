@@ -188,8 +188,8 @@ def modelo_relajado(epsilon, R, K, comunas, y_star):
 def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
 
-    model.setParam("Method", 0)
-    model.setParam("Threads", 1)
+    #model.setParam("Method", 0)
+    #model.setParam("Threads", 1)
     start_time = time.time()
     print("La cantidad de centros es",K )
     #Se calcula la población promedio

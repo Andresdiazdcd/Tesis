@@ -6,7 +6,6 @@ import pandas as pd
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
-
 def modelo_a_asignaciones_df(modelo):
     filas = []
 

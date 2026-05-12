@@ -13,7 +13,7 @@ from funciones import (obtener_comunas, dist, obtener_region, resultados_sampleo
 
 from DataChile.chile_data import regiones
 
-from modelos import modelo_con_limite, modelo_centros_fijos_con_limite
+from modelos import modelo_sin_limite, modelo_centros_fijos_sin_limite
 
 
 from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
@@ -55,7 +55,7 @@ matriz_ady=np.matrix.round(m_ady)
 
 # SE CARGA EL PREPROCESAMIENTO DE S COMO DICCIONARIO,
 # DE FORMA QUE DESPUÉS SOLO SE DEBA ACCEDER A LOS VALORES Y NO GENERARLOS EN CADA ITERACIÓN
-with open('DataChile/s_nuevo.txt', 'r') as dict_file:
+with open('DataChile/s_new.txt', 'r') as dict_file:
     dict_text = dict_file.read()
     dict_s = eval(dict_text)
 
@@ -72,31 +72,28 @@ for comuna in R:
 
 K_centros = 28
 
-TIPO_MODELO = "CL" # CON LIMITE
-METODO = "SAMPFORD" #
+TIPO_MODELO = "SL" # CON LIMITE
+METODO = "sys" # Systematic
 
-print("Leamos el modelo")
+modelo_con_limite = gp.read("datos_modelo/modelo_sl.lp")
 
-modelo_con_limite = gp.read("datos_modelo/modelo.lp")
-
-print("Modelo leído")
-
-with open("datos_modelo/valores.json", "r") as f:
+with open("datos_modelo/valores_sl.json", "r") as f:
     valores_raw = json.load(f)
-    
+
+print("Modelo leído", flush=True)   
 # normalizar nombres
 valores = {}
 for k, v in valores_raw.items():
     valores[k.replace(" ", "_")] = v
 
 print()
-print(f'MÉTODO DE SAMPLEO: {METODO}\n')
+print(f'MÉTODO DE SAMPLEO: {METODO}\n', flush= True)
 
 count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo_con_limite, 28, valores)
 
-print(f"Centros fijados por modelo: {count_centros_fijados}")
+print(f"Centros fijados por modelo: {count_centros_fijados}", flush=True)
 
-def obtener_centros_fijados(modelo, valores):
+def centros_fijados(modelo, valores):
     centros = []
     for v in modelo.getVars():
         if v.VarName.startswith("centros_j") and valores[v.VarName] == 1.0:
@@ -106,15 +103,15 @@ def obtener_centros_fijados(modelo, valores):
             centros.append(comuna)
     return centros
 
-centros_fijados = obtener_centros_fijados(modelo_con_limite, valores)
+centros_fijados = centros_fijados(modelo_con_limite, valores)
 
-print(f"Centros fijados por modelo check 1: {len(centros_fijados)}")
+print(f"Centros fijados por modelo check 1: {len(centros_fijados)}", flush=True)
 
 comunas_t, probabilidades = zip(*centros_frac)
 comunas_t = [c.replace("_", " ") for c in comunas_t]
 probabilidades = list(probabilidades)
 
-HORAS = 15
+HORAS = 12
 TIEMPO_MAX = HORAS * 60 * 60
 t_inicio = time.time()
 
@@ -125,10 +122,10 @@ k_sampleo = K_centros - len(centros_fijados)
 n = len(comunas_t)
 total_combinaciones = math.comb(len(comunas_t), k_sampleo)
 
-print(f"Centros a samplear: {k_sampleo}")
-print(f"Cantidad de comunas fraccionarias: {n}")
-print(f"Total combinaciones teóricas: {total_combinaciones}")
-print(f"Meta de mapas factibles a guardar: {t_mapas}")
+print(f"Centros a samplear: {k_sampleo}", flush=True)
+print(f"Cantidad de comunas fraccionarias: {n}", flush=True)
+print(f"Total combinaciones teóricas: {total_combinaciones}", flush=True)
+print(f"Meta de mapas factibles a guardar: {t_mapas}", flush=True)
 
 BASE_RESULTADOS = "resultados"
 os.makedirs(BASE_RESULTADOS, exist_ok=True)
@@ -158,9 +155,9 @@ repetidos_consecutivos = 0
 errores_gurobi = 0
 errores_otro_tipo = 0
 
-LOG_CADA = 10
+LOG_CADA = 50
 MAX_REPETIDOS_CONSECUTIVOS = 5000
-PREMUESTREO_MUESTRAS = 10000
+PREMUESTREO_MUESTRAS = 50
 
 
 def log_mensaje(mensaje, consola=True, archivo=True, overwrite=False):
@@ -207,12 +204,12 @@ with open(ruta_log, "w", encoding="utf-8") as f_log:
 # ---------------------------------
 # PREMUESTREO DIAGNÓSTICO
 # ---------------------------------
-print("Antes del premuestreo")
-
 vistos_premuestreo = set()
 
+print("Comienza pre muestreo", flush=True)
+
 for _ in range(PREMUESTREO_MUESTRAS):
-    centros_i = sampford_sampling(comunas_t, probabilidades, k_sampleo)
+    centros_i = systematic_sampling(comunas_t, probabilidades, k_sampleo)
     centros_i = [c.replace("_", " ") for c in centros_i]
     vistos_premuestreo.add(tuple(sorted(centros_i)))
 
@@ -223,6 +220,7 @@ mensaje = (
 )
 log_mensaje(mensaje, consola=True, archivo=True, overwrite=False)
 
+print("Hola", flush=True)
 # ---------------------------------
 # LOOP PRINCIPAL
 # ---------------------------------
@@ -254,7 +252,7 @@ while len(centros_factibles) < t_mapas:
     intentos += 1
 
     try:
-        centros_i = sampford_sampling(comunas_t, probabilidades, k_sampleo)
+        centros_i = systematic_sampling(comunas_t, probabilidades, k_sampleo)
         centros_i = [c.replace("_", " ") for c in centros_i]
         centros_i_key = tuple(sorted(centros_i))
 
@@ -267,7 +265,8 @@ while len(centros_factibles) < t_mapas:
 
             if intentos % LOG_CADA == 0:
                 mensaje_estado = estado_actual()
-                log_mensaje(mensaje_estado, consola=True, archivo=False, overwrite=True)
+                log_mensaje(mensaje_estado, consola=True, archivo=True, overwrite=True)
+
             continue
 
         repetidos_consecutivos = 0
@@ -283,10 +282,10 @@ while len(centros_factibles) < t_mapas:
             )
             continue
 
-        modelo_i = modelo_centros_fijos_con_limite(
+        modelo_i = modelo_centros_fijos_sin_limite(
             epsilon_1, R, centros_total_i, dict_s, comunas, verbose=False
         )
-        modelo_i.setParam("LogToConsole", 0)
+
         # INFATIBLE
         if not modelo_i:
             centros_infactibles.append(centros_total_i)

@@ -2,6 +2,7 @@ import random
 import re
 import numpy as np
 from itertools import islice, accumulate
+import bisect
 
 
 # elements = lista con nombre de comunas
@@ -12,21 +13,23 @@ from itertools import islice, accumulate
 
 def systematic_sampling(elements, probabilities, k):
 
-    # funciona si sabemos que sum(probabilidades) == k
-    probabilidades = [0] + probabilities
+    # Mezclar manteniendo correspondencia
+    combined = list(zip(elements, probabilities))
+    random.shuffle(combined)
+    elements, probabilities = zip(*combined)
+
+    probabilities = [0] + list(probabilities)
 
     n = len(elements)
 
     shift = random.uniform(0, 1)
-    
-    partial_sum_t = [x + shift for x in list(accumulate(probabilidades))]
+
+    partial_sum_t = [x + shift for x in list(accumulate(probabilities))]
 
     sampleo = []
 
     for i in range(1, k+1):
-
         for l in range(n):
-
             if partial_sum_t[l+1] > i and partial_sum_t[l] <= i:
                 sampleo.append(elements[l])
 
@@ -124,8 +127,18 @@ def weighted_choice(elements, weights):
 
     return elements[-1]
 
+def build_weighted_sampler(weights):
+    total = sum(weights)
+    cumsum = list(accumulate(weights))
+    return cumsum, total
 
-def sampford_sampling(elements, probabilities, k):
+def weighted_choice_precomputed(elements, cumsum, total):
+    r = random.random() * total
+    idx = bisect.bisect_left(cumsum, r)
+    return elements[idx]
+
+
+def sampford_sampling_base(elements, probabilities, k):
 
     while True:
 
@@ -151,3 +164,37 @@ def sampford_sampling(elements, probabilities, k):
         # Paso 3: aceptar si todos distintos
         if len(set(sampleo)) == k:
             return sampleo
+        
+
+def sampford_sampling(elements, probabilities, k):
+    n = len(elements)
+    indices = list(range(n))
+
+    pesos = []
+    for p in probabilities:
+        if round(1 - p, 12) == 0:
+            raise ValueError("Hay un p_i = 1; Sampford con esta implementación no lo maneja bien.")
+        pesos.append(p / (1 - p))
+
+    cumsum_p, total_p = build_weighted_sampler(probabilities)
+    cumsum_w, total_w = build_weighted_sampler(pesos)
+
+    while True:
+        usados = set()
+        sampleo_idx = []
+
+        i1 = weighted_choice_precomputed(indices, cumsum_p, total_p)
+        usados.add(i1)
+        sampleo_idx.append(i1)
+
+        valido = True
+        for _ in range(k - 1):
+            elegido = weighted_choice_precomputed(indices, cumsum_w, total_w)
+            if elegido in usados:
+                valido = False
+                break
+            usados.add(elegido)
+            sampleo_idx.append(elegido)
+
+        if valido:
+            return [elements[i] for i in sampleo_idx]

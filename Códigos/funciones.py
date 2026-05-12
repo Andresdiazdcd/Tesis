@@ -120,15 +120,14 @@ def extraer_prob_centros(modelo, K, valores):
     print(f"Hay {len(centros_frac)} comunas con peso positivo\n")
 
     return count_centros_fijados, centros_frac, top_centros_frac
-
 # modelo PL gurobi
 # k = número de centros con los que estamos trabajando
 # n = número de sampleos
-def resultados_systematic(modelo, k, n):
+def resultados_systematic(modelo, k, n, valores):
 
   print(f"----- Resultados para Systematic Sampling -----\n")
 
-  count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo, k)
+  count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo, k, valores)
 
   # Ordenar de menor a mayor por probabilidad
   probabilidades_ordenadas = sorted(centros_frac, key=lambda x: x[1])
@@ -187,7 +186,7 @@ def resultados_systematic(modelo, k, n):
   return frecuencias_ordenadas_systematic, conteo_systematic, esperanza_empirica
 
    
-def resultados_sampleo(modelo, k, n, metodo='systematic'):
+def resultados_sampleo(modelo, k, n, metodo='systematic', valores=None):
     """
     Ejecuta y grafica resultados para sampling sistemático o pivotal.
 
@@ -199,7 +198,7 @@ def resultados_sampleo(modelo, k, n, metodo='systematic'):
     """
     print(f"----- Resultados para {metodo.capitalize()} Sampling -----\n")
 
-    count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo, k)
+    count_centros_fijados, centros_frac, top_centros_frac = extraer_prob_centros(modelo, k, valores)
 
     # Ordenar comunas por probabilidad (de menor a mayor)
     probabilidades_ordenadas = sorted(centros_frac, key=lambda x: x[1])
@@ -286,7 +285,7 @@ def parse_x_name(varname: str):
 
 # ==== EXPORTADOR DE UN MODELO =====
 def extraer_y_guardar_modelo(
-    model, centros, R, comunas, outdir, etiqueta, meta_muestreo=None
+    model, centros, R, comunas, outdir, etiqueta, meta_muestreo=None, valores=None
 ):
     """
     Guarda por modelo:
@@ -326,7 +325,7 @@ def extraer_y_guardar_modelo(
         if ij is None:
             continue
         i, j = ij
-        val = float(v.X)
+        val = float(valores[v.VarName])
         xvals[(i, j)] = val
         asignaciones.append({"i": i, "j": j, "x": val})
         if abs(val) > 1e-9:
@@ -378,7 +377,7 @@ def extraer_y_guardar_modelo(
     return resumen
 
 # ==== AGREGADOS PARA EXPERIMENTOS =====
-def matriz_X_desde_modelo(model):
+def matriz_X_desde_modelo(model, valores):
     X = {}
     for v in model.getVars():
         if not v.VarName.startswith("x["):
@@ -386,18 +385,18 @@ def matriz_X_desde_modelo(model):
         ij = parse_x_name(v.VarName)
         if ij is None:
             continue
-        val = float(v.X)
+        val = float(valores[v.VarName])
         if abs(val) > 1e-9:
             X[ij] = val
     return X
 
-def promedio_X(modelos):
+def promedio_X(modelos, valores_por_modelo):
     acc = defaultdict(float)
     T = 0
     for m in modelos:
         if not m or m.Status != GRB.OPTIMAL:
             continue
-        X = matriz_X_desde_modelo(m)
+        X = matriz_X_desde_modelo(m, valores_por_modelo[m])
         for k, v in X.items():
             acc[k] += v
         T += 1
