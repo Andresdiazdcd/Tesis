@@ -1,6 +1,6 @@
 # distritos_chile.py
 # Fuente:
-# [BCN Mapoteca Distritos](https://www.bcn.cl/siit/mapoteca/distritos?utm_source=chatgpt.com)
+# [BCN Mapoteca Distritos](https://www.bcn.cl/siit/mapoteca/distritos)
 
 DISTRITOS_CHILE = {
     1: [
