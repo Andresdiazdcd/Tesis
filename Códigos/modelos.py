@@ -265,6 +265,87 @@ def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
         return model
     else:
         return False
+    
+def modelo_IP(epsilon, R, K, dict_s, comunas):
+    model = Model("Modelo Sin Límite")
+
+    #model.setParam("Method", 0)
+    #model.setParam("Threads", 1)
+    start_time = time.time()
+    print("La cantidad de centros es",K )
+    #Se calcula la población promedio
+    phat= calcular_poblacion_total(comunas, R)/K
+
+    # se generan los parametros i,j
+    Xij = [(i,j) for i in R for j in R]
+    Yj = [(j) for j in R]
+
+    #se crea la variable, xij si es que i pertenece al distrito con centro j
+    x= model.addVars(Xij,vtype=GRB.BINARY,name="asignaciones_ij")
+    y = model.addVars(Yj, vtype=GRB.BINARY, name="centros_j")
+
+    model.setObjective(0,GRB.MINIMIZE)
+
+    for j in R:
+        # Balance de población, permitiendo una diferencia de 1+-epsilon
+        model.addConstr(quicksum(pob(comunas, i) * x[i, j] for i in R) <= phat * (1 + epsilon)*y[j])
+        model.addConstr(quicksum(pob(comunas, i) * x[i, j] for i in R) >= phat * (1 - epsilon)*y[j])
+        #Cuando un comuna es centro, debe estar asignada al distrito del cuál es centro
+        model.addConstr((x[j, j]) == y[j])
+        #Los centros deben ser igual a K (un parametro fijo y dado para el modelo)
+        model.addConstr(quicksum(y[j] for j in R) == K)
+
+    for i in R:
+        #Todas las comunas deben estar asignadas a algún centro
+        model.addConstr(quicksum(x[i,j] for j in R) == 1)
+        for j in R:
+          #Asigno comunas a un centro, solo si esa comuna esta abierta como centro
+          model.addConstr(x[i,j]<= y[j])
+          # Restricción de contiguidad
+          # Se consulta en el diccionario dict_s (donde esta guardado shortest simple path)
+          # Si es que las comunas no son adyacentes, se pide que para que i y j sean asignados
+          # i y k deben estar obligatoriamente asignadas, porque para poder de i a j, k está en el camino
+          aux_s = dict_s[(j, i)]
+          while not aux_s == [[]]:
+              for k in aux_s:
+                  model.addConstr(quicksum(x[k[0], j] for k in aux_s) >= x[i, j])
+                  aux_s = dict_s[(j, k[0])]
+
+    model.optimize()
+    end_time = time.time()
+    #model.computeIIS()
+    #model.write('iismodel.ilp')
+    #Si es que el modelo es factible, se imprimen algunos resultados.
+    #if model.status == GRB.Status.OPTIMAL:
+    #    duration = end_time - start_time
+    #    print(f"El código se ejecutó en {duration:.2f} segundos")
+    #    asignacion = []
+    #    asignacion_value=[]
+    #    for i in model.getVars():
+    #      if i.x > 0:
+    #        print(i.VarName,i.x)
+    #        if "asignaciones_ij" in i.VarName:
+    #        #EN "asignacion" SE GUARDAN LOS NOMBRES DE LAS VARIABLES
+    #          asignacion.append(i.VarName)
+    #        #EN "asignacion_value" SE GUARDAN EL NOMBRE SEGUIDO POR EL VALOR DE ASIGNACIÓN
+    #          asignacion_value.append(i.VarName)
+    #          asignacion_value.append(i.x)
+    #else:
+    #    print("El modelo es infactible")
+
+    #COMO EL MODELO ES UNA FUNCIÓN SE ENTREGAN ALGUNOS RETURN PARA OCUPARLOS POSTERIORMENTE
+    if model.status == GRB.Status.OPTIMAL:
+        duration = end_time - start_time
+        print(f"El código se ejecutó en {duration:.2f} segundos")
+        resultado = []
+        for j in R:
+            valor = y[j].x
+            if valor > 0:
+                resultado.append((j, valor))
+                # print(f"{j}: {valor:.4f}")
+        return model
+    else:
+        return False
 
 def modelo_sin_limite_1(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
