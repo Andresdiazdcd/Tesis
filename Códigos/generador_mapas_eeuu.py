@@ -41,10 +41,9 @@ ESTADOS = {
 
 METODOS = ["sys"]
 
-EPSILONS = (
-    [0.00001, 0.0001, 0.001, 0.01] +
-    [round(i / 100, 2) for i in range(2, 81)]
-)
+EPSILONS = [
+    1.850999
+]
 
 T_MAPAS = 100
 HORAS = 60
@@ -446,6 +445,25 @@ resumenes = []
 
 for sigla, config in ESTADOS.items():
     for metodo in METODOS:
+
+        carpeta_resultado = os.path.join(
+            BASE_RESULTADOS,
+            f"{sigla}_{metodo}"
+        )
+
+        resumen_path = os.path.join(carpeta_resultado, "resumen.csv")
+
+        if os.path.exists(resumen_path):
+            df_prev = pd.read_csv(resumen_path)
+
+            if (
+                len(df_prev) > 0
+                and df_prev.loc[0, "mapas_factibles"] >= T_MAPAS
+            ):
+                print(f"[SKIP] {sigla}_{metodo} ya completo.")
+                resumenes.append(df_prev.iloc[0].to_dict())
+                continue
+
         resumenes.append(
             correr_estado_metodo(sigla, config, metodo)
         )
