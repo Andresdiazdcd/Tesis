@@ -4,6 +4,14 @@ import matplotlib.pyplot as plt
 import re
 from datetime import datetime
 from shapely.geometry import box
+
+def limpiar_nombre(x):
+    return (
+        str(x)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+    )
 def graficar_eeuu_desde_asignaciones_csv(
     ruta_asignaciones,
     ruta_geojson,
@@ -11,14 +19,15 @@ def graficar_eeuu_desde_asignaciones_csv(
     tol=1e-6,
     titulo="Distritaje EEUU",
     legend=True,
-    cmap="tab20"
+    cmap="tab20",
+    col_geo="county_muni"
 ):
     df = pd.read_csv(ruta_asignaciones)
 
     df = df[df["x"] > tol].copy()
 
-    df["comuna"] = df["i"].astype(str).str.strip().str.lower()
-    df["centro"] = df["j"].astype(str).str.strip().str.lower()
+    df["comuna"] = df["i"].apply(limpiar_nombre)
+    df["centro"] = df["j"].apply(limpiar_nombre)
 
     df_plot = (
         df.sort_values("x", ascending=False)
@@ -28,13 +37,7 @@ def graficar_eeuu_desde_asignaciones_csv(
 
     gdf = gpd.read_file(ruta_geojson)
 
-    gdf["comuna"] = (
-        gdf["county"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-    )
+    gdf["comuna"] = gdf[col_geo].apply(limpiar_nombre)
 
     gdf = gdf.merge(df_plot, on="comuna", how="left")
 

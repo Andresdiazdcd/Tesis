@@ -7,6 +7,9 @@ import scipy.sparse as sp
 import gurobipy as gp
 from gurobipy import GRB
 import json
+import pandas as pd
+import pickle
+from collections import defaultdict
 
 import pandas as pd
 import networkx as nx
@@ -23,27 +26,78 @@ from funciones import (obtener_comunas, dist, obtener_region, resultados_sampleo
                        promedio_X, comparar_con_baseline, build_matrices_from_gurobi, delta_b_from_eps,
                        extraer_prob_centros)
 
-from modelos import (modelo_con_limite, modelo_centros_fijos_sin_limite,
-                     modelo_sin_limite, modelo_IP)
+from modelos import (modelo_sin_limite_sparse_v2)
 
-comunas = pd.read_excel('Dict_eeuu/data_eeuu_procesada_county_muni/comunas_pa.xlsx')
-distancias = pd.read_excel('Dict_eeuu/data_eeuu_procesada_county_muni/distancias_pa.xlsx')
+from data_chile_distrito_censal.chile_data import regiones
 
-with open('Dict_eeuu/data_eeuu_procesada_county_muni/s_nuevo_pa.txt', 'r') as dict_file:
-    dict_text = dict_file.read()
-    dict_s = eval(dict_text)
+print("\n==============================")
+print("LEYENDO DATOS CHILE CENSAL")
+print("==============================")
 
-R = obtener_comunas(comunas, "pennsylvania")
+comunas = pd.read_excel('data_chile_distrito_censal/comunas_chile_2024_caso_A_principal.xlsx')
+print("[OK] comunas_chile.xlsx leído")
+print("shape comunas:", comunas.shape)
+print("columnas comunas:", comunas.columns.tolist())
+print(comunas.head())
 
-# ============================================================
-# BÚSQUEDA DE EPSILON FACTIBLE
-# ============================================================
+distancias = pd.read_excel('data_chile_distrito_censal/distancias_chile_2024_caso_A_principal.xlsx')
+print("\n[OK] distancias_chile.xlsx leído")
+print("shape distancias:", distancias.shape)
+print("primeras columnas distancias:", distancias.columns[:8].tolist())
 
-epsilon_inicial = 0.00001
-epsilon_max = 0.5
-paso = 0.005  
+print("\nLeyendo s_nuevo...")
+with open(
+    "data_chile_distrito_censal/s_nuevo_chile_2024_caso_A_principal.pkl",
+    "rb"
+) as f:
+    dict_s_base = pickle.load(f)
 
-K = 17
+print("[OK] s_nuevo_chile.txt leído")
+
+print("Evaluando dict_s...")
+dict_s = defaultdict(lambda: [[]], dict_s_base)
+print("[OK] s_nuevo_chile_sparse.pkl leído")
+print("Creando defaultdict...")
+
+print("\nChequeando regiones disponibles...")
+print("Regiones en comunas:")
+print(sorted(comunas["region"].unique()))
+
+print("\nRegiones esperadas:")
+print(regiones)
+
+R_por_region = {}
+
+for region in sorted(comunas["region"].unique()):
+    r_region = obtener_comunas(comunas, region)
+    R_por_region[region] = r_region
+    print(f"{region}: {len(r_region)} unidades")
+
+R = sum(R_por_region.values(), [])
+
+print("\nTotal R:", len(R))
+print("Total comunas archivo:", len(comunas))
+
+faltan_en_R = set(comunas["comuna"]) - set(R)
+print("Unidades no incluidas en R:", len(faltan_en_R))
+
+if faltan_en_R:
+    print(list(faltan_en_R)[:30])
+
+print("==============================")
+print("FIN LECTURA")
+print("==============================\n")
+
+
+# # ============================================================
+# # BÚSQUEDA DE EPSILON FACTIBLE
+# # ============================================================
+
+epsilon_inicial = 0.31
+epsilon_max = 0.4
+paso = 0.01
+
+K = 28
 
 ensure_dir("datos_modelo")
 
@@ -55,29 +109,55 @@ while epsilon <= epsilon_max + 1e-12:
 
     print(f"\nProbando epsilon = {epsilon:.5f}")
 
-    modelo = modelo_sin_limite(epsilon, R, K, dict_s, comunas)
+    modelo = modelo_sin_limite_sparse_v2(
+        epsilon=epsilon,
+        R=R,
+        K=28,
+        dict_s=dict_s,
+        comunas=comunas,
+        distancias=distancias,
+        M=120,
+        usar_contiguidad=True,
+        max_iter_cierre=50
+    )
+    if modelo is None:
+        print(f"epsilon={epsilon:.5f} infactible/no óptimo")
+        epsilon += paso
+        continue
 
     status = modelo.Status
 
     if status == GRB.OPTIMAL:
+
         print(f"[OK] Modelo factible con epsilon = {epsilon:.5f}")
 
         modelo_factible = modelo
         epsilon_factible = epsilon
 
-        # Guardar PL
-        ruta_lp = f"datos_modelo/modelo_pa_county_muni_eps_{epsilon:.5f}.lp"
+        ruta_lp = (
+            f"datos_modelo/modelo_chile_censal_eps_"
+            f"{epsilon:.5f}_A_sl_v2.lp"
+        )
+
         modelo.write(ruta_lp)
 
-        # Guardar valores
-        valores_ia = {v.VarName: v.X for v in modelo.getVars()}
+        valores = {
+            v.VarName: v.X
+            for v in modelo.getVars()
+        }
 
-        ruta_json = f"datos_modelo/valores_pa_county_muni_eps_{epsilon:.5f}.json"
+        ruta_json = (
+            f"datos_modelo/valores_chile_censal_eps_"
+            f"{epsilon:.5f}_A_sl_v2.json"
+        )
+
         with open(ruta_json, "w") as f:
-            json.dump(valores_ia, f)
+            json.dump(valores, f)
 
-        # Guardar epsilon encontrado
-        with open("datos_modelo/epsilon_factible_pa_county_muni.txt", "w") as f:
+        with open(
+            "datos_modelo/epsilon_factible_chile_censal_A_sl_v2.txt",
+            "w"
+        ) as f:
             f.write(str(epsilon_factible))
 
         print(f"[OK] LP guardado en: {ruta_lp}")
@@ -94,8 +174,13 @@ while epsilon <= epsilon_max + 1e-12:
 
     epsilon += paso
 
-
 if modelo_factible is None:
-    print(f"\n[FIN] No se encontró factibilidad hasta epsilon = {epsilon_max}")
+    print(
+        f"\n[FIN] No se encontró factibilidad "
+        f"hasta epsilon = {epsilon_max}"
+    )
 else:
-    print(f"\nEpsilon factible encontrado: {epsilon_factible:.5f}")
+    print(
+        f"\nEpsilon factible encontrado: "
+        f"{epsilon_factible:.5f}"
+    )

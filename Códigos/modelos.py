@@ -79,8 +79,8 @@ def modelo_con_limite_con_obj(epsilon, R, K, dict_s, comunas, dist_dict):
 
 def modelo_con_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Con Límite Regional")
-    model.setParam("Method", 0)
-    model.setParam("Threads", 1)
+    model.setParam("Method", 2)
+    #model.setParam("Threads", 1)
 
     phat = calcular_poblacion_total(comunas, R) / K
 
@@ -118,11 +118,16 @@ def modelo_con_limite(epsilon, R, K, dict_s, comunas):
             # Restricción de contigüidad
             if obtener_region(comunas, i) == obtener_region(comunas, j):
                 aux_s = dict_s[(j, i)]
-                while not aux_s == [[]]:
-                    for k in aux_s:
-                        model.addConstr(quicksum(x[k[0], j] for k in aux_s) >= x[i, j],
-                                        name=f"path[{i},{j},{k[0]}]")
-                        aux_s = dict_s[(j, k[0])]
+
+                while aux_s != [[]]:
+                    k = aux_s[0][0]
+
+                    model.addConstr(
+                        x[k, j] >= x[i, j],
+                        name=f"path[{i},{j},{k}]"
+                    )
+
+                    aux_s = dict_s[(j, k)]
     model.optimize()
 
     if model.status == GRB.Status.OPTIMAL:
@@ -136,6 +141,393 @@ def modelo_con_limite(epsilon, R, K, dict_s, comunas):
     else:
         print("Modelo infactible")
         return None
+    
+
+
+def modelo_con_limite_opti(epsilon, R, K, dict_s, comunas):
+    model = Model("Modelo Con Límite Regional")
+
+    model.setParam("Method", 1)
+    model.setParam("Threads", 6)
+    #model.setParam("SoftMemLimit", 15.0)
+    model.setParam("OutputFlag", 1)
+
+    region = {i: obtener_region(comunas, i) for i in R}
+    pobl = {i: pob(comunas, i) for i in R}
+
+    phat = sum(pobl[i] for i in R) / K
+
+    # Solo pares dentro de la misma región
+    Xij = [(i, j) for i in R for j in R if region[i] == region[j]]
+
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # Índices inversos
+    I_por_j = {j: [] for j in R}
+    J_por_i = {i: [] for i in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+        J_por_i[i].append(j)
+
+    # Balance poblacional
+    for j in R:
+
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # Asignación
+    for i in R:
+
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # Contigüidad
+    for i in R:
+        for j in J_por_i[i]:
+
+            if i == j:
+                continue
+
+            aux_s = dict_s[(j, i)]
+
+            while aux_s != [[]]:
+
+                k = aux_s[0][0]
+
+                # Protección por si falta alguna clave
+                if (k, j) in x:
+
+                    model.addConstr(
+                        x[k, j] >= x[i, j],
+                        name=f"path[{i},{j},{k}]"
+                    )
+
+                aux_s = dict_s[(j, k)]
+
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        return model
+
+    if model.status == GRB.Status.MEM_LIMIT:
+        print("FALTA MEMORIA RAM")
+    else:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
+
+
+def modelo_sin_limite_sparse(
+    epsilon,
+    R,
+    K,
+    dict_s,
+    comunas,
+    distancias,
+    M=60,
+    usar_contiguidad=True
+):
+    """
+    Modelo sin límite regional sparse.
+
+    Idea:
+    - Parte con los M centros más cercanos para cada unidad i.
+    - Luego hace cierre por caminos:
+        si permito x[i,j] y el camino j -> i requiere k,
+        entonces también permito x[k,j].
+    - Esto evita bloquear artificialmente asignaciones que en el modelo denso sí existirían.
+    """
+
+    start_time = time.time()
+
+    model = Model("Modelo Sin Límite Sparse con Cierre")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 8)
+    model.setParam("SoftMemLimit", 20.0)
+    model.setParam("OutputFlag", 1)
+
+    print("Modelo: SIN límite regional sparse con cierre")
+    print("K:", K)
+    print("M inicial:", M)
+    print("Usar contigüidad:", usar_contiguidad)
+
+    # -----------------------------------------------------
+    # 1. Población
+    # -----------------------------------------------------
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    dist_df = distancias.set_index("comuna")
+
+    # -----------------------------------------------------
+    # 2. Candidatos iniciales: M más cercanos
+    # -----------------------------------------------------
+    J_por_i = {}
+
+    for i in R:
+        candidatos = (
+            dist_df.loc[i, R]
+            .sort_values()
+            .index
+            .tolist()
+        )
+
+        J = candidatos[:M]
+
+        # Necesario para que exista x[i,i]
+        if i not in J:
+            J.append(i)
+
+        J_por_i[i] = set(J)
+
+    pares_iniciales = sum(len(J_por_i[i]) for i in R)
+    print("Pares iniciales:", pares_iniciales)
+
+    # -----------------------------------------------------
+    # 3. Cierre por caminos
+    # -----------------------------------------------------
+    # Diferencia clave con la versión anterior:
+    # antes, si faltaba x[k,j], se imponía x[i,j] = 0.
+    # ahora agregamos j como candidato de k.
+    #
+    # Esto mantiene la lógica del modelo denso:
+    # si i puede asignarse a j, los intermedios del camino
+    # también pueden asignarse a j.
+    # -----------------------------------------------------
+    if usar_contiguidad:
+        print("Aplicando cierre por caminos...")
+
+        cambios = True
+        n_agregados = 0
+        iter_cierre = 0
+
+        while cambios:
+            cambios = False
+            iter_cierre += 1
+            agregados_iter = 0
+
+            for i in R:
+                for j in list(J_por_i[i]):
+
+                    if i == j:
+                        continue
+
+                    aux_s = dict_s[(j, i)]
+
+                    while aux_s != [[]]:
+                        k = aux_s[0][0]
+
+                        # Si el camino requiere k, debe existir x[k,j].
+                        if j not in J_por_i[k]:
+                            J_por_i[k].add(j)
+                            n_agregados += 1
+                            agregados_iter += 1
+                            cambios = True
+
+                        aux_s = dict_s[(j, k)]
+
+            print(
+                f"  iter cierre {iter_cierre}: "
+                f"agregados={agregados_iter}"
+            )
+
+        print("Candidatos agregados por cierre:", n_agregados)
+
+    # Volver a listas ordenadas
+    J_por_i = {i: sorted(J_por_i[i]) for i in R}
+
+    Xij = [(i, j) for i in R for j in J_por_i[i]]
+
+    print("Variables x:", len(Xij))
+    print("Variables y:", len(R))
+    print("Pares densos serían:", len(R) * len(R))
+
+    # -----------------------------------------------------
+    # 4. Variables
+    # -----------------------------------------------------
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 5. Índice inverso
+    # -----------------------------------------------------
+    I_por_j = {j: [] for j in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+
+    # -----------------------------------------------------
+    # 6. Balance poblacional y centro
+    # -----------------------------------------------------
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 7. Asignación y link
+    # -----------------------------------------------------
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 8. Contigüidad
+    # -----------------------------------------------------
+    n_path = 0
+    n_block = 0
+
+    if usar_contiguidad:
+        print("Agregando restricciones de contigüidad...")
+
+        for i in R:
+            for j in J_por_i[i]:
+
+                if i == j:
+                    continue
+
+                aux_s = dict_s[(j, i)]
+
+                while aux_s != [[]]:
+                    k = aux_s[0][0]
+
+                    if (k, j) in x:
+                        model.addConstr(
+                            x[k, j] >= x[i, j],
+                            name=f"path[{i},{j},{k}]"
+                        )
+                        n_path += 1
+                    else:
+                        # Esto idealmente debería ser 0 después del cierre.
+                        n_block += 1
+                        break
+
+                    aux_s = dict_s[(j, k)]
+
+    print("Restricciones path:", n_path)
+    print("Faltantes después del cierre:", n_block)
+
+    # -----------------------------------------------------
+    # 9. Diagnóstico
+    # -----------------------------------------------------
+    model.update()
+
+    print("NumVars:", model.NumVars)
+    print("NumConstrs:", model.NumConstrs)
+
+    # -----------------------------------------------------
+    # 10. Optimizar
+    # -----------------------------------------------------
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"[OK] Tiempo: {time.time() - start_time:.2f} segundos")
+        return model
+
+    if model.status == GRB.Status.MEM_LIMIT:
+        print("FALTA MEMORIA RAM")
+    else:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
 
 def modelo_relajado(epsilon, R, K, comunas, y_star):
 
@@ -572,7 +964,7 @@ def modelo_sin_limite_1(epsilon, R, K, dict_s, comunas):
 def modelo_centros_fijos_con_limite(epsilon, R, C, dict_s, comunas, verbose=True):
     model = Model("Modelo")
     model.setParam("Method", 0)
-    model.setParam("Threads", 1)
+    model.setParam("Threads", 6)
 
     if verbose:
         model.Params.LogToConsole = 1
@@ -722,13 +1114,18 @@ def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas, verbose = Tr
         duration = end_time - start_time
         print(f"El código se ejecutó en {duration:.2f} segundos")
         return model
-    else:
-        return False
+    try: 
+        if int(model.Status == 17):
+            print("FALTA MEMORIA RAM")
+    except:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
     
 def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
 
-    #model.setParam("Method", 0)
+    model.setParam("Method", 2) #-> recomendable según la gente de gurobi para large problems (fueza usar barrier algorithm)
     #model.setParam("Threads", 1)
     start_time = time.time()
     print("La cantidad de centros es",K )
@@ -803,5 +1200,924 @@ def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
                 resultado.append((j, valor))
                 # print(f"{j}: {valor:.4f}")
         return model
+    try: 
+        if int(model.Status == 17):
+            print("FALTA MEMORIA RAM")
+    except:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
+
+    
+def modelo_sin_limite_opti(epsilon, R, K, dict_s, comunas):
+    """
+    Modelo sin límite regional.
+
+    Mantiene la idea original:
+    - todos los pares (i,j),
+    - balance poblacional proporcional a y[j],
+    - x[j,j] = y[j],
+    - sum(y) = K,
+    - asignación completa,
+    - link x[i,j] <= y[j],
+    - contigüidad vía dict_s.
+
+    Cambios solo de implementación:
+    - cache de población,
+    - cotas explícitas 0 <= x,y <= 1,
+    - sum(y)=K se agrega una sola vez,
+    - protección si dict_s trae un nodo k que no está en R,
+    - SoftMemLimit,
+    - diagnóstico de variables/restricciones.
+    """
+
+    model = Model("Modelo Sin Límite")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 4)
+    #model.setParam("SoftMemLimit", 15.0)
+    model.setParam("OutputFlag", 1)
+
+    start_time = time.time()
+
+    print("La cantidad de centros es", K)
+
+    # -----------------------------------------------------
+    # 1. Cache de población
+    # -----------------------------------------------------
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango permitido:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    # -----------------------------------------------------
+    # 2. Todos los pares, como en el modelo clásico
+    # -----------------------------------------------------
+    Xij = [(i, j) for i in R for j in R]
+
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 3. Balance poblacional y centro
+    # -----------------------------------------------------
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in R
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    # En el original estaba dentro del for j.
+    # Es equivalente agregarlo una sola vez.
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 4. Asignación y link
+    # -----------------------------------------------------
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in R) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in R:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 5. Contigüidad
+    # -----------------------------------------------------
+    n_path = 0
+    n_skip = 0
+
+    for i in R:
+        for j in R:
+
+            if i == j:
+                continue
+
+            aux_s = dict_s[(j, i)]
+
+            while aux_s != [[]]:
+
+                # En tu dict_s normalmente aux_s = [[k]]
+                # pero dejamos la suma para mantener la lógica original.
+                ks_validos = [
+                    k[0] for k in aux_s
+                    if (k[0], j) in x
+                ]
+
+                if ks_validos:
+                    model.addConstr(
+                        quicksum(x[k, j] for k in ks_validos) >= x[i, j],
+                        name=f"path[{i},{j}]"
+                    )
+                    n_path += 1
+                else:
+                    # Si dict_s trae un k fuera de R, no hacemos caer el modelo.
+                    # Esto no debería pasar si dict_s fue creado con el mismo R.
+                    n_skip += 1
+                    break
+
+                # Avanzamos por el primer k, igual que en tu versión original.
+                k_next = aux_s[0][0]
+
+                if k_next not in R:
+                    n_skip += 1
+                    break
+
+                aux_s = dict_s[(j, k_next)]
+
+    print("Restricciones path:", n_path)
+    print("Paths omitidos por k fuera de R:", n_skip)
+
+    # -----------------------------------------------------
+    # 6. Diagnóstico
+    # -----------------------------------------------------
+    model.update()
+
+    print("Variables:", model.NumVars)
+    print("Restricciones:", model.NumConstrs)
+
+    # -----------------------------------------------------
+    # 7. Resolver
+    # -----------------------------------------------------
+    model.optimize()
+
+    end_time = time.time()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"El código se ejecutó en {end_time - start_time:.2f} segundos")
+
+        for j in R:
+            valor = y[j].X
+            if valor > 1e-8:
+                print(f"{j}: {valor:.4f}")
+
+        return model
+
+    if model.status == GRB.Status.MEM_LIMIT:
+        print("FALTA MEMORIA RAM")
     else:
-        return False
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
+
+
+import time
+import pickle
+from collections import defaultdict
+from gurobipy import Model, GRB, quicksum
+
+
+# =========================================================
+# funciones optimizadas
+# =========================================================
+
+# =========================================================
+# HELPER 2: construir candidatos sparse
+# =========================================================
+
+def construir_J_por_i_sparse(R, comunas, distancias, M=60, con_limite=False):
+    """
+    Construye J_por_i.
+
+    J_por_i[i] = lista de centros j a los que i puede asignarse.
+
+    Caso sin límite regional:
+        i puede mirar sus M centros más cercanos dentro de todo R.
+
+    Caso con límite regional:
+        i solo puede mirar sus M centros más cercanos dentro de su misma región.
+
+    Esta es la parte que reemplaza el modelo denso:
+        antes: j en R para todo i
+        ahora: j en M más cercanos para cada i
+    """
+
+    dist_df = distancias.set_index("comuna")
+
+    if con_limite:
+        region = {i: obtener_region(comunas, i) for i in R}
+    else:
+        region = None
+
+    J_por_i = {}
+
+    for i in R:
+
+        if con_limite:
+            candidatos_base = [
+                j for j in R
+                if region[j] == region[i]
+            ]
+        else:
+            candidatos_base = list(R)
+
+        candidatos = (
+            dist_df.loc[i, candidatos_base]
+            .sort_values()
+            .index
+            .tolist()
+        )
+
+        J = candidatos[:M]
+
+        # Importante: asegurar que exista x[i,i],
+        # porque usamos la restricción x[j,j] = y[j].
+        if i not in J:
+            J.append(i)
+
+        J_por_i[i] = J
+
+    return J_por_i
+
+
+# =========================================================
+# MODELO 1: SIN límite regional sparse
+# =========================================================
+
+def modelo_sin_limite_sparse(
+    epsilon,
+    R,
+    K,
+    dict_s,
+    comunas,
+    distancias,
+    M=60,
+    usar_contiguidad=True
+):
+    """
+    Modelo sin límite regional, versión sparse.
+
+    Diferencia con el modelo clásico:
+    - Antes se creaban todos los pares (i,j), es decir |R|^2 variables x.
+    - Ahora cada unidad i solo puede asignarse a sus M centros más cercanos.
+
+    Si usar_contiguidad=True:
+    - Se agregan restricciones de camino usando dict_s desde .pkl.
+    - Si el camino exige un nodo k, pero x[k,j] no existe por el sparseo,
+      se bloquea x[i,j] = 0.
+    """
+
+    start_time = time.time()
+
+    model = Model("Modelo Sin Límite Sparse")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 8)
+    #model.setParam("SoftMemLimit", 20.0)
+    model.setParam("OutputFlag", 1)
+
+    print("Modelo: SIN límite regional")
+    print("K:", K)
+    print("M:", M)
+    print("Usar contigüidad:", usar_contiguidad)
+
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    # -----------------------------------------------------
+    # 1. Candidatos sparse
+    # -----------------------------------------------------
+    J_por_i = construir_J_por_i_sparse(
+        R=R,
+        comunas=comunas,
+        distancias=distancias,
+        M=M,
+        con_limite=False
+    )
+
+    Xij = [(i, j) for i in R for j in J_por_i[i]]
+
+    print("Variables x:", len(Xij))
+    print("Variables y:", len(R))
+    print("Pares densos serían:", len(R) * len(R))
+
+    # -----------------------------------------------------
+    # 2. Variables
+    # -----------------------------------------------------
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 3. Índices inversos
+    # -----------------------------------------------------
+    I_por_j = {j: [] for j in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+
+    # -----------------------------------------------------
+    # 4. Balance poblacional y centro
+    # -----------------------------------------------------
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 5. Asignación y link
+    # -----------------------------------------------------
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 6. Contigüidad
+    # -----------------------------------------------------
+    n_path = 0
+    n_block = 0
+
+    if usar_contiguidad:
+        print("Agregando contigüidad...")
+
+        for i in R:
+            for j in J_por_i[i]:
+
+                if i == j:
+                    continue
+
+                aux_s = dict_s[(j, i)]
+
+                while aux_s != [[]]:
+                    k = aux_s[0][0]
+
+                    if (k, j) in x:
+                        model.addConstr(
+                            x[k, j] >= x[i, j],
+                            name=f"path[{i},{j},{k}]"
+                        )
+                        n_path += 1
+                    else:
+                        model.addConstr(
+                            x[i, j] == 0,
+                            name=f"path_block[{i},{j},{k}]"
+                        )
+                        n_block += 1
+                        break
+
+                    aux_s = dict_s[(j, k)]
+
+    print("Restricciones path:", n_path)
+    print("Asignaciones bloqueadas:", n_block)
+
+    model.update()
+
+    print("NumVars:", model.NumVars)
+    print("NumConstrs:", model.NumConstrs)
+
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"[OK] Tiempo: {time.time() - start_time:.2f} segundos")
+        return model
+
+    try: 
+        if int(model.Status == 17):
+            print("FALTA MEMORIA RAM")
+    except:
+        print("Modelo no óptimo. Status:", model.status)
+    return None
+
+
+def modelo_sin_limite_sparse_v2(
+    epsilon,
+    R,
+    K,
+    dict_s,
+    comunas,
+    distancias,
+    M=60,
+    usar_contiguidad=True,
+    max_iter_cierre=10
+):
+    """
+    Modelo sin límite regional, versión sparse v2.
+
+    Diferencia con el sparse anterior:
+    - Antes, si el camino j -> i necesitaba un nodo k y no existía x[k,j],
+      se bloqueaba x[i,j] = 0.
+    - Ahora NO se bloquea.
+    - En cambio, antes de crear variables, se agregan al sparse los pares
+      necesarios para que los caminos puedan existir.
+
+    Esto se aleja menos del modelo original.
+    """
+
+    start_time = time.time()
+
+    model = Model("Modelo Sin Límite Sparse v2")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 8)
+    model.setParam("OutputFlag", 1)
+
+    print("Modelo: SIN límite regional SPARSE v2")
+    print("K:", K)
+    print("M inicial:", M)
+    print("Usar contigüidad:", usar_contiguidad)
+
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    # -----------------------------------------------------
+    # 1. Candidatos sparse iniciales
+    # -----------------------------------------------------
+    J_por_i = construir_J_por_i_sparse(
+        R=R,
+        comunas=comunas,
+        distancias=distancias,
+        M=M,
+        con_limite=False
+    )
+
+    pares_iniciales = sum(len(J_por_i[i]) for i in R)
+
+    print("Pares sparse iniciales:", pares_iniciales)
+    print("Pares densos serían:", len(R) * len(R))
+
+    # -----------------------------------------------------
+    # 2. Cierre por caminos
+    # -----------------------------------------------------
+    if usar_contiguidad:
+        print("\nAplicando cierre por caminos...")
+
+        R_set = set(R)
+
+        for it in range(1, max_iter_cierre + 1):
+
+            cambios = 0
+            nuevos = {i: set(J_por_i[i]) for i in R}
+
+            for i in R:
+                for j in list(J_por_i[i]):
+
+                    if i == j:
+                        continue
+
+                    aux_s = dict_s[(j, i)]
+
+                    while aux_s != [[]]:
+
+                        k = aux_s[0][0]
+
+                        if k not in R_set:
+                            break
+
+                        # Si x[i,j] existe, entonces x[k,j] debe existir también.
+                        if j not in nuevos[k]:
+                            nuevos[k].add(j)
+                            cambios += 1
+
+                        aux_s = dict_s[(j, k)]
+
+            J_por_i = {
+                i: sorted(nuevos[i])
+                for i in R
+            }
+
+            total_pares = sum(len(J_por_i[i]) for i in R)
+
+            print(
+                f"Iteración cierre {it}: "
+                f"pares={total_pares}, "
+                f"nuevos={cambios}"
+            )
+
+            if cambios == 0:
+                print("[OK] Cierre por caminos estabilizado.")
+                break
+
+        else:
+            print("[WARN] Cierre llegó a max_iter_cierre sin estabilizar.")
+
+    pares_finales = sum(len(J_por_i[i]) for i in R)
+
+    print("\nPares finales:", pares_finales)
+    print("Aumento por cierre:", pares_finales - pares_iniciales)
+    print("Fracción del denso:", pares_finales / (len(R) * len(R)))
+
+    # -----------------------------------------------------
+    # 3. Variables
+    # -----------------------------------------------------
+    Xij = [
+        (i, j)
+        for i in R
+        for j in J_por_i[i]
+    ]
+
+    print("Variables x:", len(Xij))
+    print("Variables y:", len(R))
+
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 4. Índices inversos
+    # -----------------------------------------------------
+    I_por_j = {j: [] for j in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+
+    # -----------------------------------------------------
+    # 5. Balance poblacional y centro
+    # -----------------------------------------------------
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 6. Asignación y link
+    # -----------------------------------------------------
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 7. Contigüidad
+    # -----------------------------------------------------
+    n_path = 0
+    n_missing = 0
+
+    if usar_contiguidad:
+        print("\nAgregando contigüidad...")
+
+        for i in R:
+            for j in J_por_i[i]:
+
+                if i == j:
+                    continue
+
+                aux_s = dict_s[(j, i)]
+
+                while aux_s != [[]]:
+
+                    k = aux_s[0][0]
+
+                    if (k, j) in x:
+                        model.addConstr(
+                            x[k, j] >= x[i, j],
+                            name=f"path[{i},{j},{k}]"
+                        )
+                        n_path += 1
+                    else:
+                        # En v2 no bloqueamos x[i,j].
+                        # Si esto aparece mucho, el cierre no fue suficiente.
+                        n_missing += 1
+                        break
+
+                    aux_s = dict_s[(j, k)]
+
+    print("Restricciones path:", n_path)
+    print("Pares faltantes post-cierre:", n_missing)
+
+    model.update()
+
+    print("NumVars:", model.NumVars)
+    print("NumConstrs:", model.NumConstrs)
+
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"[OK] Tiempo: {time.time() - start_time:.2f} segundos")
+        return model
+
+    if model.status == GRB.Status.MEM_LIMIT:
+        print("FALTA MEMORIA RAM")
+    else:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None
+# =========================================================
+# MODELO 2: CON límite regional sparse
+# =========================================================
+
+def modelo_con_limite_sparse(
+    epsilon,
+    R,
+    K,
+    dict_s,
+    comunas,
+    distancias,
+    M=60,
+    usar_contiguidad=True
+):
+    """
+    Modelo con límite regional, versión sparse.
+
+    Diferencia con el modelo sin límite:
+    - Cada unidad i solo puede asignarse a centros j de su misma región.
+    - Dentro de esa región, se toman los M centros más cercanos.
+
+    Si usar_contiguidad=True:
+    - Se usan caminos desde dict_s.
+    - Si falta x[k,j] por sparseo, se bloquea x[i,j].
+    """
+
+    start_time = time.time()
+    model = Model("Modelo Con Límite Regional Sparse")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 8)
+    model.setParam("SoftMemLimit", 20.0)
+    model.setParam("OutputFlag", 1)
+
+    print("Modelo: CON límite regional")
+    print("K:", K)
+    print("M:", M)
+    print("Usar contigüidad:", usar_contiguidad)
+
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    # -----------------------------------------------------
+    # 1. Candidatos sparse con límite regional
+    # -----------------------------------------------------
+    J_por_i = construir_J_por_i_sparse(
+        R=R,
+        comunas=comunas,
+        distancias=distancias,
+        M=M,
+        con_limite=True
+    )
+
+    Xij = [(i, j) for i in R for j in J_por_i[i]]
+
+    print("Variables x:", len(Xij))
+    print("Variables y:", len(R))
+    print("Pares densos serían:", len(R) * len(R))
+
+    # -----------------------------------------------------
+    # 2. Variables
+    # -----------------------------------------------------
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 3. Índice inverso
+    # -----------------------------------------------------
+    I_por_j = {j: [] for j in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+
+    # -----------------------------------------------------
+    # 4. Balance poblacional y centro
+    # -----------------------------------------------------
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 5. Asignación y link
+    # -----------------------------------------------------
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 6. Contigüidad
+    # -----------------------------------------------------
+    n_path = 0
+    n_block = 0
+
+    if usar_contiguidad:
+        print("Agregando contigüidad...")
+
+        for i in R:
+            for j in J_por_i[i]:
+
+                if i == j:
+                    continue
+
+                aux_s = dict_s[(j, i)]
+
+                while aux_s != [[]]:
+                    k = aux_s[0][0]
+
+                    if (k, j) in x:
+                        model.addConstr(
+                            x[k, j] >= x[i, j],
+                            name=f"path[{i},{j},{k}]"
+                        )
+                        n_path += 1
+                    else:
+                        model.addConstr(
+                            x[i, j] == 0,
+                            name=f"path_block[{i},{j},{k}]"
+                        )
+                        n_block += 1
+                        break
+
+                    aux_s = dict_s[(j, k)]
+
+    print("Restricciones path:", n_path)
+    print("Asignaciones bloqueadas:", n_block)
+
+    model.update()
+
+    print("NumVars:", model.NumVars)
+    print("NumConstrs:", model.NumConstrs)
+
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"[OK] Tiempo: {time.time() - start_time:.2f} segundos")
+        return model
+
+    try: 
+        if int(model.Status == 17):
+            print("FALTA MEMORIA RAM")
+    except:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None

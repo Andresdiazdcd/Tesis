@@ -1,56 +1,41 @@
-import os, json, time
+import os
+import json
+import time
+import math
+import pickle
 import pandas as pd
 import gurobipy as gp
-import numpy as np
-import pickle
 from collections import defaultdict
 
 from funciones import obtener_comunas, extraer_prob_centros
 from modelos import modelo_centros_fijos_sin_limite
 from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
 from funciones_guardado import guardar_resultado_factible
+from data_chile_distrito_censal.chile_data import regiones
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-ESTADOS = {
-    #"ia": {
-    #    "region": "iowa",
-    #    "K": 4,
-    #    "comunas": "DataEEUU/data_eeuu_procesada/comunas_ia.xlsx",
-    #    "s_nuevo": "DataEEUU/data_eeuu_procesada/s_nuevo_ia.txt",
-    #    "modelo_lp": "datos_modelo/modelo_ia.lp",
-    #    "valores_json": "datos_modelo/valores_ia.json",
-    #},
-    #"wi": {
-    #    "region": "wisconsin",
-    #    "K": 8,
-    #    "comunas": "DataEEUU2/data_eeuu_procesada_county_muni_wi/comunas_wi.xlsx",
-    #    "s_nuevo": "DataEEUU2/data_eeuu_procesada_county_muni_wi/s_nuevo_wi.txt",
-    #    "modelo_lp": "datos_modelo/modelo_wi_county_muni_eps_0.00001.lp",
-    #    "valores_json": "datos_modelo/valores_wi_county_muni_eps_0.00001.json",
-    #} #,
-    "pa": {
-        "region": "pennsylvania",
-        "K": 17,
-        "comunas": "DataEEUU2/data_eeuu_procesada_county_muni_pa/comunas_pa.xlsx",
-        "s_nuevo": "DataEEUU2/data_eeuu_procesada_county_muni_pa/s_nuevo_pa.txt",
-        "modelo_lp": "datos_modelo/modelo_pa_county_muni_eps_0.00001.lp",
-        "valores_json": "datos_modelo/valores_pa_county_muni_eps_0.00001.json",
-    }#,
+CONFIG_CHILE = {
+    "region": "chile",
+    "K": 28,
+    "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_A_principal.xlsx",
+    "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_A_principal.pkl",
+    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.37000_A_sl_v2.lp",
+    "valores_json": "datos_modelo/valores_chile_censal_eps_0.37000_A_sl_v2.json",
 }
 
 METODOS = ["sys"]
 
-EPSILONS = [0.001, 0.01, 0.1] + [round(x, 2) for x in np.arange(0.15, 1.01, 0.05)]
-
+#EPSILONS = [0.001, 0.01, 0.1] + [round(x, 2) for x in pd.np.arange(0.15, 1.01, 0.05)]
+EPSILONS = [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
 T_MAPAS = 100
 HORAS = 60
 LOG_CADA = 50
 
-BASE_RESULTADOS = "resultados_eeuu_county_muni"
+BASE_RESULTADOS = "resultados_chile_censal"
 os.makedirs(BASE_RESULTADOS, exist_ok=True)
 
 
@@ -63,6 +48,7 @@ def cargar_dict_s(path):
         dict_s_base = pickle.load(f)
 
     return defaultdict(lambda: [[]], dict_s_base)
+
 
 def cargar_valores(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -100,7 +86,7 @@ def samplear_centros(metodo, comunas_t, probabilidades, k_sampleo):
     raise ValueError(f"Método no reconocido: {metodo}")
 
 
-def buscar_epsilon_minimo_estado(
+def buscar_epsilon_minimo_chile(
     R,
     centros_fijados,
     comunas_t,
@@ -109,13 +95,8 @@ def buscar_epsilon_minimo_estado(
     dict_s,
     comunas,
     metodo,
-    max_intentos_por_eps=200
+    max_intentos_por_eps=5
 ):
-    """
-    Busca el menor epsilon del estado que logra al menos una muestra factible.
-    Apenas encuentra factibilidad, retorna ese epsilon.
-    """
-
     for eps in EPSILONS:
         print(f"\nBuscando factibilidad con epsilon = {eps}", flush=True)
 
@@ -138,7 +119,7 @@ def buscar_epsilon_minimo_estado(
 
             vistos.add(key)
 
-            centros_total = centros_fijados + centros_i
+            centros_total = centros_fijados + centros_i 
 
             if len(centros_total) != len(centros_fijados) + k_sampleo:
                 continue
@@ -154,8 +135,7 @@ def buscar_epsilon_minimo_estado(
 
             if modelo:
                 print(
-                    f"[EPSILON FIJO ENCONTRADO] epsilon={eps} | "
-                    f"intento={intento}",
+                    f"[EPSILON FIJO ENCONTRADO] epsilon={eps} | intento={intento}",
                     flush=True
                 )
                 return eps, centros_total, modelo
@@ -170,18 +150,23 @@ def buscar_epsilon_minimo_estado(
 
 
 # ============================================================
-# CORRIDA POR ESTADO Y MÉTODO
+# CORRIDA CHILE
 # ============================================================
 
-def correr_estado_metodo(sigla, config, metodo):
+def correr_chile_metodo(config, metodo):
 
     print("\n" + "=" * 70)
-    print(f"ESTADO: {sigla.upper()} | MÉTODO: {metodo}")
+    print(f"CHILE | MÉTODO: {metodo}")
     print("=" * 70)
 
     comunas = pd.read_excel(config["comunas"])
     dict_s = cargar_dict_s(config["s_nuevo"])
-    R = obtener_comunas(comunas, config["region"])
+
+    R_por_region = {}
+    for region in sorted(comunas["region"].unique()):
+        R_por_region[region] = obtener_comunas(comunas, region)
+
+    R = sum(R_por_region.values(), [])
     K_centros = config["K"]
 
     modelo_pl = gp.read(config["modelo_lp"])
@@ -197,7 +182,7 @@ def correr_estado_metodo(sigla, config, metodo):
     k_sampleo = K_centros - len(centros_fijados)
 
     if k_sampleo < 0:
-        raise ValueError(f"{sigla}: hay más centros fijados que K.")
+        raise ValueError("Hay más centros fijados que K.")
 
     print(f"Nodos R: {len(R)}")
     print(f"K: {K_centros}")
@@ -207,7 +192,7 @@ def correr_estado_metodo(sigla, config, metodo):
 
     base_resultados = os.path.join(
         BASE_RESULTADOS,
-        f"{sigla}_{metodo}"
+        f"chile_{metodo}"
     )
     os.makedirs(base_resultados, exist_ok=True)
 
@@ -217,8 +202,7 @@ def correr_estado_metodo(sigla, config, metodo):
 
     with open(ruta_log, "w", encoding="utf-8") as f:
         f.write(f"Inicio: {time.ctime()}\n")
-        f.write(f"estado={sigla}\n")
-        f.write(f"region={config['region']}\n")
+        f.write("pais=chile\n")
         f.write(f"metodo={metodo}\n")
         f.write(f"K={K_centros}\n")
         f.write(f"centros_fijados={len(centros_fijados)}\n")
@@ -226,10 +210,10 @@ def correr_estado_metodo(sigla, config, metodo):
         f.write(f"epsilons={EPSILONS}\n\n")
 
     # ========================================================
-    # FASE 1: buscar epsilon mínimo fijo del estado
+    # FASE 1: buscar epsilon mínimo
     # ========================================================
 
-    epsilon_estado, centros_iniciales, modelo_inicial = buscar_epsilon_minimo_estado(
+    epsilon_chile, centros_iniciales, modelo_inicial = buscar_epsilon_minimo_chile(
         R=R,
         centros_fijados=centros_fijados,
         comunas_t=comunas_t,
@@ -238,24 +222,24 @@ def correr_estado_metodo(sigla, config, metodo):
         dict_s=dict_s,
         comunas=comunas,
         metodo=metodo,
-        max_intentos_por_eps=200
+        max_intentos_por_eps=500
     )
 
-    if epsilon_estado is None:
-        print(f"No se encontró epsilon factible para {sigla}.")
+    if epsilon_chile is None:
+        print("No se encontró epsilon factible para Chile.")
         return {
-            "estado": sigla,
+            "pais": "chile",
             "metodo": metodo,
-            "epsilon_estado": None,
+            "epsilon_chile": None,
             "mapas_factibles": 0,
             "resultados": base_resultados,
         }
 
     with open(ruta_log, "a", encoding="utf-8") as f:
-        f.write(f"\nEPSILON_ESTADO={epsilon_estado}\n\n")
+        f.write(f"\nEPSILON_CHILE={epsilon_chile}\n\n")
 
     # ========================================================
-    # FASE 2: generar mapas usando SIEMPRE epsilon_estado
+    # FASE 2: generar mapas usando epsilon_chile fijo
     # ========================================================
 
     t_inicio = time.time()
@@ -272,7 +256,6 @@ def correr_estado_metodo(sigla, config, metodo):
     repetidos = 0
     errores = 0
 
-    # guardar la muestra que encontró el epsilon
     centros_factibles.append(centros_iniciales)
     factibles_set.add(tuple(sorted(centros_iniciales)))
 
@@ -282,9 +265,8 @@ def correr_estado_metodo(sigla, config, metodo):
         modelo_inicial,
         centros_iniciales,
         metadata={
-            "estado": sigla,
-            "region": config["region"],
-            "epsilon_estado": epsilon_estado,
+            "pais": "chile",
+            "epsilon_chile": epsilon_chile,
             "K_centros": K_centros,
             "cantidad_centros": len(centros_iniciales),
             "intento": 0,
@@ -295,12 +277,12 @@ def correr_estado_metodo(sigla, config, metodo):
 
     with open(ruta_factibles, "a", encoding="utf-8") as f:
         f.write(
-            f"epsilon_estado={epsilon_estado} | "
+            f"epsilon_chile={epsilon_chile} | "
             + ",".join(centros_iniciales)
             + "\n"
         )
 
-    print(f"[OK] t_001 | epsilon_estado={epsilon_estado}", flush=True)
+    print(f"[OK] t_001 | epsilon_chile={epsilon_chile}", flush=True)
 
     while len(centros_factibles) < T_MAPAS:
 
@@ -321,10 +303,12 @@ def correr_estado_metodo(sigla, config, metodo):
             centros_i = list(centros_i)
             centros_total = centros_fijados + centros_i
 
-            centros_i_key = tuple(sorted(centros_total))
-            observados_set.add(centros_i_key)
+            
 
-            if centros_i_key in factibles_set or centros_i_key in infactibles_set:
+            centros_key = tuple(sorted(centros_total))
+            observados_set.add(centros_key)
+
+            if centros_key in factibles_set or centros_key in infactibles_set:
                 repetidos += 1
                 continue
 
@@ -337,7 +321,7 @@ def correr_estado_metodo(sigla, config, metodo):
                 continue
 
             modelo_i = modelo_centros_fijos_sin_limite(
-                epsilon_estado,
+                epsilon_chile,
                 R,
                 centros_total,
                 dict_s,
@@ -347,7 +331,7 @@ def correr_estado_metodo(sigla, config, metodo):
 
             if not modelo_i:
                 centros_infactibles.append(centros_total)
-                infactibles_set.add(centros_i_key)
+                infactibles_set.add(centros_key)
 
                 with open(ruta_infactibles, "a", encoding="utf-8") as f:
                     f.write(",".join(centros_total) + "\n")
@@ -355,7 +339,7 @@ def correr_estado_metodo(sigla, config, metodo):
                 continue
 
             centros_factibles.append(centros_total)
-            factibles_set.add(centros_i_key)
+            factibles_set.add(centros_key)
 
             nombre_resultado = f"t_{len(centros_factibles):03d}"
 
@@ -365,9 +349,8 @@ def correr_estado_metodo(sigla, config, metodo):
                 modelo_i,
                 centros_total,
                 metadata={
-                    "estado": sigla,
-                    "region": config["region"],
-                    "epsilon_estado": epsilon_estado,
+                    "pais": "chile",
+                    "epsilon_chile": epsilon_chile,
                     "K_centros": K_centros,
                     "cantidad_centros": len(centros_total),
                     "intento": intentos,
@@ -377,14 +360,14 @@ def correr_estado_metodo(sigla, config, metodo):
 
             with open(ruta_factibles, "a", encoding="utf-8") as f:
                 f.write(
-                    f"epsilon_estado={epsilon_estado} | "
+                    f"epsilon_chile={epsilon_chile} | "
                     + ",".join(centros_total)
                     + "\n"
                 )
 
             msg = (
-                f"[OK] {sigla} {nombre_resultado} | "
-                f"epsilon_estado={epsilon_estado} | "
+                f"[OK] chile {nombre_resultado} | "
+                f"epsilon_chile={epsilon_chile} | "
                 f"intento={intentos} | "
                 f"factibles={len(centros_factibles)} | "
                 f"infactibles={len(centros_infactibles)} | "
@@ -416,10 +399,9 @@ def correr_estado_metodo(sigla, config, metodo):
             print(f"[ERROR] intento={intentos} | {e}", flush=True)
 
     resumen = {
-        "estado": sigla,
-        "region": config["region"],
+        "pais": "chile",
         "metodo": metodo,
-        "epsilon_estado": epsilon_estado,
+        "epsilon_chile": epsilon_chile,
         "mapas_factibles": len(centros_factibles),
         "infactibles": len(centros_infactibles),
         "observados": len(observados_set),
@@ -445,30 +427,29 @@ def correr_estado_metodo(sigla, config, metodo):
 
 resumenes = []
 
-for sigla, config in ESTADOS.items():
-    for metodo in METODOS:
+for metodo in METODOS:
 
-        carpeta_resultado = os.path.join(
-            BASE_RESULTADOS,
-            f"{sigla}_{metodo}"
-        )
+    carpeta_resultado = os.path.join(
+        BASE_RESULTADOS,
+        f"chile_{metodo}"
+    )
 
-        resumen_path = os.path.join(carpeta_resultado, "resumen.csv")
+    resumen_path = os.path.join(carpeta_resultado, "resumen.csv")
 
-        if os.path.exists(resumen_path):
-            df_prev = pd.read_csv(resumen_path)
+    if os.path.exists(resumen_path):
+        df_prev = pd.read_csv(resumen_path)
 
-            if (
-                len(df_prev) > 0
-                and df_prev.loc[0, "mapas_factibles"] >= T_MAPAS
-            ):
-                print(f"[SKIP] {sigla}_{metodo} ya completo.")
-                resumenes.append(df_prev.iloc[0].to_dict())
-                continue
+        if (
+            len(df_prev) > 0
+            and df_prev.loc[0, "mapas_factibles"] >= T_MAPAS
+        ):
+            print(f"[SKIP] chile_{metodo} ya completo.")
+            resumenes.append(df_prev.iloc[0].to_dict())
+            continue
 
-        resumenes.append(
-            correr_estado_metodo(sigla, config, metodo)
-        )
+    resumenes.append(
+        correr_chile_metodo(CONFIG_CHILE, metodo)
+    )
 
 df_resumen = pd.DataFrame(resumenes)
 
