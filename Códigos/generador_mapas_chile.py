@@ -8,7 +8,7 @@ import gurobipy as gp
 from collections import defaultdict
 
 from funciones import obtener_comunas, extraer_prob_centros
-from modelos import modelo_centros_fijos_sin_limite
+from modelos import modelo_centros_fijos_con_limite
 from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
 from funciones_guardado import guardar_resultado_factible
 from data_chile_distrito_censal.chile_data import regiones
@@ -23,14 +23,14 @@ CONFIG_CHILE = {
     "K": 28,
     "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_A_principal.xlsx",
     "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_A_principal.pkl",
-    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.37000_A_sl_v2.lp",
-    "valores_json": "datos_modelo/valores_chile_censal_eps_0.37000_A_sl_v2.json",
+    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.63000.lp",
+    "valores_json": "datos_modelo/valores_chile_censal_eps_0.63000.json",
 }
 
 METODOS = ["sys"]
 
 #EPSILONS = [0.001, 0.01, 0.1] + [round(x, 2) for x in pd.np.arange(0.15, 1.01, 0.05)]
-EPSILONS = [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+EPSILONS = [0.64, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
 T_MAPAS = 100
 HORAS = 60
 LOG_CADA = 50
@@ -124,7 +124,7 @@ def buscar_epsilon_minimo_chile(
             if len(centros_total) != len(centros_fijados) + k_sampleo:
                 continue
 
-            modelo = modelo_centros_fijos_sin_limite(
+            modelo = modelo_centros_fijos_con_limite(
                 eps,
                 R,
                 centros_total,
@@ -320,7 +320,7 @@ def correr_chile_metodo(config, metodo):
                     )
                 continue
 
-            modelo_i = modelo_centros_fijos_sin_limite(
+            modelo_i = modelo_centros_fijos_con_limite(
                 epsilon_chile,
                 R,
                 centros_total,

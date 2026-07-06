@@ -186,6 +186,27 @@ def limpiar_nombre_chile(x):
         .replace("ñ", "n").replace("'", "")
         .replace(" ", "_")
     )
+import pyarrow.parquet as pq
+from shapely import wkb
+import geopandas as gpd
+
+def leer_distritos_chile_2024(path_parquet):
+    table = pq.read_table(path_parquet)
+    df = table.to_pandas()
+
+    df["geometry"] = df["SHAPE"].apply(
+        lambda x: wkb.loads(bytes(x)) if x is not None else None
+    )
+
+    gdf = gpd.GeoDataFrame(
+        df,
+        geometry="geometry",
+        crs="EPSG:4326"
+    )
+
+    gdf["comuna"] = "dist_" + gdf["ID_DISTRITO"].astype(int).astype(str)
+
+    return gdf
 
 def graficar_desde_asignaciones_csv(
     ruta_asignaciones,
@@ -209,9 +230,19 @@ def graficar_desde_asignaciones_csv(
           [["comuna", "centro"]]
     )
 
-    gdf = gpd.read_file(ruta_geojson)
-    gdf["comuna"] = gdf["county"].apply(limpiar_nombre_chile)
+    #gdf = gpd.read_file(ruta_geojson)
+    #gdf["comuna"] = gdf["county"].apply(limpiar_nombre_chile)
+    #gdf = leer_distritos_chile_2024(ruta_geojson)
+    comunas_A = pd.read_excel(
+    "DataChileMANZANAS/data_chile_2024_procesada/caso_A_principal/comunas_chile_2024_caso_A_principal.xlsx"
+)
 
+    gdf = leer_distritos_chile_2024(
+        "DataChileMANZANAS/Cartografia_censo2024_Pais_Distrital.parquet"
+    )
+
+    gdf = gdf[gdf["comuna"].isin(comunas_A["comuna"])].copy()
+    
     gdf = gdf.merge(df_plot, on="comuna", how="left")
 
     print("Total polígonos:", len(gdf))
