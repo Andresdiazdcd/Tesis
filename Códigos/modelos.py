@@ -2121,3 +2121,314 @@ def modelo_con_limite_sparse(
         print("Modelo no óptimo. Status:", model.status)
 
     return None
+
+def modelo_con_limite_sparse_v2(
+    epsilon,
+    R,
+    K,
+    dict_s,
+    comunas,
+    distancias,
+    M=60,
+    usar_contiguidad=True,
+    max_iter_cierre=10
+):
+    """
+    Modelo con límite regional, versión sparse v2.
+
+    Misma lógica que modelo_sin_limite_sparse_v2, pero con límite regional.
+
+    Diferencia principal:
+    - construir_J_por_i_sparse se llama con con_limite=True.
+    - En el cierre por caminos solo se agregan pares (k,j) si k y j
+      pertenecen a la misma región.
+    - En la contigüidad NO se bloquea x[i,j] si falta x[k,j].
+      Solo se cuenta como n_missing, igual que en la versión sin límite v2.
+    """
+
+    start_time = time.time()
+
+    model = Model("Modelo Con Límite Sparse v2")
+
+    model.setParam("Method", 2)
+    model.setParam("Crossover", 0)
+    model.setParam("Threads", 8)
+    model.setParam("OutputFlag", 1)
+
+    print("Modelo: CON límite regional SPARSE v2")
+    print("K:", K)
+    print("M inicial:", M)
+    print("Usar contigüidad:", usar_contiguidad)
+
+    pobl = {i: pob(comunas, i) for i in R}
+    phat = sum(pobl[i] for i in R) / K
+
+    print("Población total:", sum(pobl.values()))
+    print("phat:", phat)
+    print("Rango:", phat * (1 - epsilon), phat * (1 + epsilon))
+
+    # -----------------------------------------------------
+    # 0. Región por unidad
+    # -----------------------------------------------------
+
+    region_de = {
+        i: obtener_region(comunas, i)
+        for i in R
+    }
+
+    # -----------------------------------------------------
+    # 1. Candidatos sparse iniciales con límite regional
+    # -----------------------------------------------------
+
+    J_por_i = construir_J_por_i_sparse(
+        R=R,
+        comunas=comunas,
+        distancias=distancias,
+        M=M,
+        con_limite=True
+    )
+
+    pares_iniciales = sum(len(J_por_i[i]) for i in R)
+
+    print("Pares sparse iniciales:", pares_iniciales)
+    print("Pares densos con límite serían:", sum(
+        sum(1 for j in R if region_de[j] == region_de[i])
+        for i in R
+    ))
+
+    # -----------------------------------------------------
+    # 2. Cierre por caminos
+    # -----------------------------------------------------
+    # Misma lógica que sin_limite_sparse_v2:
+    #
+    # Si x[i,j] existe, y el camino desde j hacia i exige k,
+    # entonces debe existir x[k,j].
+    #
+    # Como hay límite regional, solo podemos agregar x[k,j] si
+    # k y j están en la misma región.
+    # -----------------------------------------------------
+
+    if usar_contiguidad:
+        print("\nAplicando cierre por caminos...")
+
+        R_set = set(R)
+
+        for it in range(1, max_iter_cierre + 1):
+
+            cambios = 0
+            nuevos = {i: set(J_por_i[i]) for i in R}
+
+            for i in R:
+                for j in list(J_por_i[i]):
+
+                    if i == j:
+                        continue
+
+                    aux_s = dict_s[(j, i)]
+
+                    while aux_s != [[]]:
+
+                        k = aux_s[0][0]
+
+                        if k not in R_set:
+                            break
+
+                        # Con límite regional, x[k,j] solo puede existir
+                        # si k y j son de la misma región.
+                        if region_de[k] != region_de[j]:
+                            break
+
+                        # Si x[i,j] existe, entonces x[k,j] debe existir.
+                        if j not in nuevos[k]:
+                            nuevos[k].add(j)
+                            cambios += 1
+
+                        aux_s = dict_s[(j, k)]
+
+            J_por_i = {
+                i: sorted(nuevos[i])
+                for i in R
+            }
+
+            total_pares = sum(len(J_por_i[i]) for i in R)
+
+            print(
+                f"Iteración cierre {it}: "
+                f"pares={total_pares}, "
+                f"nuevos={cambios}"
+            )
+
+            if cambios == 0:
+                print("[OK] Cierre por caminos estabilizado.")
+                break
+
+        else:
+            print("[WARN] Cierre llegó a max_iter_cierre sin estabilizar.")
+
+    pares_finales = sum(len(J_por_i[i]) for i in R)
+
+    pares_densos_limite = sum(
+        sum(1 for j in R if region_de[j] == region_de[i])
+        for i in R
+    )
+
+    print("\nPares finales:", pares_finales)
+    print("Aumento por cierre:", pares_finales - pares_iniciales)
+    print("Fracción del denso con límite:", pares_finales / pares_densos_limite)
+
+    # -----------------------------------------------------
+    # 3. Variables
+    # -----------------------------------------------------
+
+    Xij = [
+        (i, j)
+        for i in R
+        for j in J_por_i[i]
+    ]
+
+    print("Variables x:", len(Xij))
+    print("Variables y:", len(R))
+
+    x = model.addVars(
+        Xij,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="asignaciones_ij"
+    )
+
+    y = model.addVars(
+        R,
+        vtype=GRB.CONTINUOUS,
+        lb=0,
+        ub=1,
+        name="centros_j"
+    )
+
+    # Misma lógica que tu sparse v2: objetivo 0.
+    model.setObjective(0, GRB.MINIMIZE)
+
+    # -----------------------------------------------------
+    # 4. Índices inversos
+    # -----------------------------------------------------
+
+    I_por_j = {j: [] for j in R}
+
+    for i, j in Xij:
+        I_por_j[j].append(i)
+
+    # -----------------------------------------------------
+    # 5. Balance poblacional y centro
+    # -----------------------------------------------------
+
+    for j in R:
+        expr_pop = quicksum(
+            pobl[i] * x[i, j]
+            for i in I_por_j[j]
+        )
+
+        model.addConstr(
+            expr_pop <= phat * (1 + epsilon) * y[j],
+            name=f"pop_up[{j}]"
+        )
+
+        model.addConstr(
+            expr_pop >= phat * (1 - epsilon) * y[j],
+            name=f"pop_lo[{j}]"
+        )
+
+        model.addConstr(
+            x[j, j] == y[j],
+            name=f"center[{j}]"
+        )
+
+    model.addConstr(
+        quicksum(y[j] for j in R) == K,
+        name="centers_total"
+    )
+
+    # -----------------------------------------------------
+    # 6. Asignación y link
+    # -----------------------------------------------------
+
+    for i in R:
+        model.addConstr(
+            quicksum(x[i, j] for j in J_por_i[i]) == 1,
+            name=f"assign[{i}]"
+        )
+
+        for j in J_por_i[i]:
+            model.addConstr(
+                x[i, j] <= y[j],
+                name=f"link[{i},{j}]"
+            )
+
+    # -----------------------------------------------------
+    # 7. Contigüidad
+    # -----------------------------------------------------
+
+    n_path = 0
+    n_missing = 0
+    n_fuera_region = 0
+
+    if usar_contiguidad:
+        print("\nAgregando contigüidad...")
+
+        for i in R:
+            for j in J_por_i[i]:
+
+                if i == j:
+                    continue
+
+                aux_s = dict_s[(j, i)]
+
+                while aux_s != [[]]:
+
+                    k = aux_s[0][0]
+
+                    if k not in R:
+                        n_missing += 1
+                        break
+
+                    # Con límite regional, si el camino pide un k fuera
+                    # de la región del centro j, no agregamos restricción.
+                    # Tampoco bloqueamos, para mantener la lógica v2.
+                    if region_de[k] != region_de[j]:
+                        n_fuera_region += 1
+                        break
+
+                    if (k, j) in x:
+                        model.addConstr(
+                            x[k, j] >= x[i, j],
+                            name=f"path[{i},{j},{k}]"
+                        )
+                        n_path += 1
+                    else:
+                        # Igual que en v2 sin límite:
+                        # no bloqueamos x[i,j].
+                        n_missing += 1
+                        break
+
+                    aux_s = dict_s[(j, k)]
+
+    print("Restricciones path:", n_path)
+    print("Pares faltantes post-cierre:", n_missing)
+    print("Cortes por nodo fuera de región:", n_fuera_region)
+
+    model.update()
+
+    print("NumVars:", model.NumVars)
+    print("NumConstrs:", model.NumConstrs)
+
+    model.optimize()
+
+    if model.status == GRB.Status.OPTIMAL:
+        print(f"[OK] Tiempo: {time.time() - start_time:.2f} segundos")
+        return model
+
+    if model.status == GRB.Status.MEM_LIMIT:
+        print("FALTA MEMORIA RAM")
+    else:
+        print("Modelo no óptimo. Status:", model.status)
+
+    return None

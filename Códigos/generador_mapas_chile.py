@@ -8,7 +8,7 @@ import gurobipy as gp
 from collections import defaultdict
 
 from funciones import obtener_comunas, extraer_prob_centros
-from modelos import modelo_centros_fijos_con_limite
+from modelos import modelo_centros_fijos_sin_limite
 from sampleos import systematic_sampling, pivotal_sampling, sampford_sampling
 from funciones_guardado import guardar_resultado_factible
 from data_chile_distrito_censal.chile_data import regiones
@@ -17,22 +17,37 @@ from data_chile_distrito_censal.chile_data import regiones
 # ============================================================
 # CONFIG
 # ============================================================
+# Configuración general para Chile.
+# K=28 corresponde al número total de distritos/centros.
+# El modelo LP y el JSON vienen del PL ya resuelto.
+# Desde ahí se extraen:
+#   - centros con y_j = 1
+#   - centros fraccionarios 0 < y_j < 1
+# ============================================================
 
 CONFIG_CHILE = {
     "region": "chile",
     "K": 28,
-    "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_A_principal.xlsx",
-    "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_A_principal.pkl",
-    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.63000.lp",
-    "valores_json": "datos_modelo/valores_chile_censal_eps_0.63000.json",
+    "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_B_conectado.xlsx",
+    "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_B_conectado.pkl",
+    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.30000_B_sl_v2.lp",
+    "valores_json": "datos_modelo/valores_chile_censal_eps_0.30000_B_sl_v2.json",
 }
 
+# Método de sampleo a usar.
+# Puedes cambiar a ["pivotal"], ["sampford"] o varios métodos.
 METODOS = ["sys"]
 
-#EPSILONS = [0.001, 0.01, 0.1] + [round(x, 2) for x in pd.np.arange(0.15, 1.01, 0.05)]
-EPSILONS = [0.64, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+# Epsilons que se probarán para resolver los IP con centros fijos.
+EPSILONS = [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65]
+
+# Número de mapas factibles que quieres generar.
 T_MAPAS = 100
+
+# Tiempo máximo total de la fase 2.
 HORAS = 60
+
+# Frecuencia de impresión/log.
 LOG_CADA = 50
 
 BASE_RESULTADOS = "resultados_chile_censal"
@@ -44,6 +59,12 @@ os.makedirs(BASE_RESULTADOS, exist_ok=True)
 # ============================================================
 
 def cargar_dict_s(path):
+    """
+    Carga el diccionario de caminos/intermedios usado por las restricciones
+    de contigüidad.
+
+    Se envuelve en defaultdict para que, si falta una llave, no reviente.
+    """
     with open(path, "rb") as f:
         dict_s_base = pickle.load(f)
 
@@ -51,6 +72,13 @@ def cargar_dict_s(path):
 
 
 def cargar_valores(path):
+    """
+    Carga el JSON con los valores de la solución del PL.
+
+    Importante:
+    Se reemplazan espacios por "_" para que los nombres coincidan con
+    los nombres de variables leídos desde el .lp por Gurobi.
+    """
     with open(path, "r", encoding="utf-8") as f:
         valores_raw = json.load(f)
 
@@ -58,6 +86,14 @@ def cargar_valores(path):
 
 
 def centros_fijados_desde_modelo(modelo, valores):
+    """
+    Extrae los centros que el PL dejó fijados con y_j = 1.
+
+    En tu caso, las variables se llaman:
+        centros_j[dist_...]
+
+    Estos centros ya están decididos por el PL y no entran al sampleo.
+    """
     centros = []
 
     for v in modelo.getVars():
@@ -69,6 +105,23 @@ def centros_fijados_desde_modelo(modelo, valores):
 
 
 def samplear_centros(metodo, comunas_t, probabilidades, k_sampleo):
+    """
+    Realiza el sampleo de los centros fraccionarios.
+
+    comunas_t:
+        lista de comunas candidatas con 0 < y_j < 1.
+
+    probabilidades:
+        valores y_j fraccionarios.
+
+    k_sampleo:
+        cantidad de centros restantes a seleccionar.
+        En tu caso típico:
+            K = 28
+            centros_fijados = 24
+            k_sampleo = 4
+    """
+
     if metodo == "sys":
         return systematic_sampling(comunas_t, probabilidades, k_sampleo)
 
@@ -78,12 +131,53 @@ def samplear_centros(metodo, comunas_t, probabilidades, k_sampleo):
     if metodo == "pivotal":
         out = pivotal_sampling(comunas_t, probabilidades)
 
+        # Algunos códigos de pivotal devuelven vector 0/1.
+        # Si ocurre eso, se transforma a lista de comunas seleccionadas.
         if len(out) == len(comunas_t) and all(x in [0, 1] for x in out):
             return [c for c, z in zip(comunas_t, out) if z == 1]
 
         return out
 
     raise ValueError(f"Método no reconocido: {metodo}")
+
+
+def regiones_saturadas_por_epsilon(comunas, centros_fijados, K, eps):
+    df = comunas.copy()
+    df["comuna"] = df["comuna"].astype(str)
+
+    phat = df["poblacion2017"].sum() / K
+    lb = phat * (1 - eps)
+
+    df_fijos = df[df["comuna"].isin(centros_fijados)]
+
+    pob_region = df.groupby("region")["poblacion2017"].sum()
+    centros_region = df_fijos.groupby("region")["comuna"].count()
+
+    res = pd.DataFrame({
+        "poblacion": pob_region,
+        "centros_fijos": centros_region
+    }).fillna(0)
+
+    res["centros_fijos"] = res["centros_fijos"].astype(int)
+    res["max_centros"] = (res["poblacion"] // lb).astype(int)
+    res["cupos_restantes"] = res["max_centros"] - res["centros_fijos"]
+
+    saturadas = set(res[res["cupos_restantes"] <= 0].index)
+
+    return saturadas, res
+
+
+def sampleo_cae_en_region_saturada(centros_i, comunas, regiones_saturadas):
+    df = comunas.copy()
+    df["comuna"] = df["comuna"].astype(str)
+
+    regiones_sampleo = set(
+        df[df["comuna"].isin(centros_i)]["region"]
+    )
+
+    malas = regiones_sampleo & regiones_saturadas
+
+    return len(malas) > 0, malas
 
 
 def buscar_epsilon_minimo_chile(
@@ -95,14 +189,30 @@ def buscar_epsilon_minimo_chile(
     dict_s,
     comunas,
     metodo,
-    max_intentos_por_eps=5
+    max_intentos_por_eps=10
 ):
     for eps in EPSILONS:
         print(f"\nBuscando factibilidad con epsilon = {eps}", flush=True)
 
         vistos = set()
 
-        for intento in range(1, max_intentos_por_eps + 1):
+        regiones_saturadas, tabla_saturacion = regiones_saturadas_por_epsilon(
+            comunas,
+            centros_fijados,
+            K=len(centros_fijados) + k_sampleo,
+            eps=eps
+        )
+
+        descartes_region = 0
+
+        print("Regiones saturadas:", sorted(regiones_saturadas), flush=True)
+
+        intento = 0              # sampleos totales (incluyendo descartes)
+        intentos_ip = 0          # solo los que llegan al IP
+
+        while intentos_ip < max_intentos_por_eps:
+
+            intento += 1
 
             centros_i = samplear_centros(
                 metodo,
@@ -114,17 +224,28 @@ def buscar_epsilon_minimo_chile(
             centros_i = list(centros_i)
             key = tuple(sorted(centros_i))
 
+            cae_saturada, malas = sampleo_cae_en_region_saturada(
+                centros_i,
+                comunas,
+                regiones_saturadas
+            )
+
+            if cae_saturada:
+                descartes_region += 1
+                continue
+
             if key in vistos:
                 continue
 
             vistos.add(key)
 
-            centros_total = centros_fijados + centros_i 
+            centros_total = centros_fijados + centros_i
 
             if len(centros_total) != len(centros_fijados) + k_sampleo:
                 continue
-
-            modelo = modelo_centros_fijos_con_limite(
+            
+            intentos_ip += 1
+            modelo = modelo_centros_fijos_sin_limite(
                 eps,
                 R,
                 centros_total,
@@ -138,11 +259,18 @@ def buscar_epsilon_minimo_chile(
                     f"[EPSILON FIJO ENCONTRADO] epsilon={eps} | intento={intento}",
                     flush=True
                 )
+                print(
+                    f"IP resueltos={intentos_ip} | "
+                    f"descartes_region={descartes_region}",
+                    flush=True
+                )
                 return eps, centros_total, modelo
 
         print(
-            f"No hubo factibilidad con epsilon={eps} "
-            f"en {max_intentos_por_eps} muestras distintas.",
+            f"No hubo factibilidad con epsilon={eps}. "
+            f"Sampleos totales={intento} | "
+            f"IP resueltos={intentos_ip} | "
+            f"Descartes región={descartes_region}",
             flush=True
         )
 
@@ -222,7 +350,7 @@ def correr_chile_metodo(config, metodo):
         dict_s=dict_s,
         comunas=comunas,
         metodo=metodo,
-        max_intentos_por_eps=500
+        max_intentos_por_eps=10
     )
 
     if epsilon_chile is None:
@@ -255,6 +383,19 @@ def correr_chile_metodo(config, metodo):
     intentos = 0
     repetidos = 0
     errores = 0
+    descartes_region = 0
+
+    regiones_saturadas, tabla_saturacion = regiones_saturadas_por_epsilon(
+        comunas,
+        centros_fijados,
+        K=K_centros,
+        eps=epsilon_chile
+    )
+
+    with open(ruta_log, "a", encoding="utf-8") as f:
+        f.write("\nREGIONES SATURADAS:\n")
+        f.write(tabla_saturacion.to_string())
+        f.write("\n\n")
 
     centros_factibles.append(centros_iniciales)
     factibles_set.add(tuple(sorted(centros_iniciales)))
@@ -303,7 +444,23 @@ def correr_chile_metodo(config, metodo):
             centros_i = list(centros_i)
             centros_total = centros_fijados + centros_i
 
-            
+            cae_saturada, malas = sampleo_cae_en_region_saturada(
+                centros_i,
+                comunas,
+                regiones_saturadas
+            )
+
+            if cae_saturada:
+                descartes_region += 1
+
+                with open(ruta_log, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"[DESCARTE REGION] intento={intentos} | "
+                        f"regiones={sorted(malas)} | "
+                        f"centros_sampleados={centros_i}\n"
+                    )
+
+                continue
 
             centros_key = tuple(sorted(centros_total))
             observados_set.add(centros_key)
@@ -320,7 +477,7 @@ def correr_chile_metodo(config, metodo):
                     )
                 continue
 
-            modelo_i = modelo_centros_fijos_con_limite(
+            modelo_i = modelo_centros_fijos_sin_limite(
                 epsilon_chile,
                 R,
                 centros_total,
@@ -371,6 +528,7 @@ def correr_chile_metodo(config, metodo):
                 f"intento={intentos} | "
                 f"factibles={len(centros_factibles)} | "
                 f"infactibles={len(centros_infactibles)} | "
+                f"descartes_region={descartes_region} | "
                 f"repetidos={repetidos}"
             )
 
@@ -386,6 +544,7 @@ def correr_chile_metodo(config, metodo):
                     f"obs_distintas={len(observados_set)} | "
                     f"factibles={len(centros_factibles)} | "
                     f"infactibles={len(centros_infactibles)} | "
+                    f"descartes_region={descartes_region} | "
                     f"repetidos={repetidos}"
                 )
                 print(estado, flush=True)
@@ -404,6 +563,7 @@ def correr_chile_metodo(config, metodo):
         "epsilon_chile": epsilon_chile,
         "mapas_factibles": len(centros_factibles),
         "infactibles": len(centros_infactibles),
+        "descartes_region_saturada": descartes_region,
         "observados": len(observados_set),
         "intentos": intentos,
         "repetidos": repetidos,

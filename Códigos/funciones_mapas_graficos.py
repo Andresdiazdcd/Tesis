@@ -233,8 +233,11 @@ def graficar_desde_asignaciones_csv(
     #gdf = gpd.read_file(ruta_geojson)
     #gdf["comuna"] = gdf["county"].apply(limpiar_nombre_chile)
     #gdf = leer_distritos_chile_2024(ruta_geojson)
+    #comunas_A = pd.read_excel(
+    #"DataChileMANZANAS/data_chile_2024_procesada/caso_A_principal/comunas_chile_2024_caso_A_principal.xlsx"
+#)
     comunas_A = pd.read_excel(
-    "DataChileMANZANAS/data_chile_2024_procesada/caso_A_principal/comunas_chile_2024_caso_A_principal.xlsx"
+    "DataChileMANZANAS/data_chile_2024_procesada/caso_B_conectado/comunas_chile_2024_caso_B_conectado.xlsx"
 )
 
     gdf = leer_distritos_chile_2024(
