@@ -4,6 +4,7 @@ import gurobipy as gp
 import numpy as np
 import pickle
 from collections import defaultdict
+import ast
 
 from funciones import obtener_comunas, extraer_prob_centros
 from modelos import modelo_centros_fijos_sin_limite
@@ -37,14 +38,16 @@ ESTADOS = {
         "K": 17,
         "comunas": "DataEEUU2/data_eeuu_procesada_county_muni_pa/comunas_pa.xlsx",
         "s_nuevo": "DataEEUU2/data_eeuu_procesada_county_muni_pa/s_nuevo_pa.txt",
-        "modelo_lp": "datos_modelo/modelo_pa_county_muni_eps_0.00001.lp",
-        "valores_json": "datos_modelo/valores_pa_county_muni_eps_0.00001.json",
+        "modelo_lp": "datos_modelo/modelo_pa_eps_0.01000_v2.lp",
+        "valores_json": "datos_modelo/valores_pa_eps_0.01000_v2.json",
     }#,
 }
 
 METODOS = ["sys"]
 
-EPSILONS = [0.001, 0.01, 0.1] + [round(x, 2) for x in np.arange(0.15, 1.01, 0.05)]
+#EPSILONS = [0.01, 0.1] + [round(x, 2) for x in np.arange(0.15, 1.01, 0.05)]
+EPSILONS = [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7]
+
 
 T_MAPAS = 100
 HORAS = 60
@@ -58,11 +61,19 @@ os.makedirs(BASE_RESULTADOS, exist_ok=True)
 # HELPERS
 # ============================================================
 
+#def cargar_dict_s(path):
+#    with open(path, "rb") as f:
+#        dict_s_base = pickle.load(f)
+#
+#    return defaultdict(lambda: [[]], dict_s_base)
+
+
 def cargar_dict_s(path):
-    with open(path, "rb") as f:
-        dict_s_base = pickle.load(f)
+    with open(path, "r", encoding="utf-8") as f:
+        dict_s_base = ast.literal_eval(f.read())
 
     return defaultdict(lambda: [[]], dict_s_base)
+
 
 def cargar_valores(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -109,7 +120,7 @@ def buscar_epsilon_minimo_estado(
     dict_s,
     comunas,
     metodo,
-    max_intentos_por_eps=200
+    max_intentos_por_eps=20
 ):
     """
     Busca el menor epsilon del estado que logra al menos una muestra factible.
@@ -238,7 +249,7 @@ def correr_estado_metodo(sigla, config, metodo):
         dict_s=dict_s,
         comunas=comunas,
         metodo=metodo,
-        max_intentos_por_eps=200
+        max_intentos_por_eps=20
     )
 
     if epsilon_estado is None:

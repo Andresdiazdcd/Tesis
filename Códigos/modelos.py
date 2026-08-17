@@ -1121,6 +1121,180 @@ def modelo_centros_fijos_sin_limite(epsilon, R, C, dict_s, comunas, verbose = Tr
         print("Modelo no óptimo. Status:", model.status)
 
     return None
+
+def modelo_centros_fijos_sin_limite_v2(
+    epsilon,
+    R,
+    C,
+    dict_s,
+    comunas,
+    verbose=True
+):
+    model = Model("Modelo 1")
+
+    model.setParam("Method", 0)
+    model.setParam("Threads", 1)
+
+    if verbose:
+        model.Params.LogToConsole = 1
+    else:
+        model.Params.LogToConsole = 0
+
+    start_time = time.time()
+
+    print("La cantidad de centros es", len(C))
+
+    # Se calcula la población promedio.
+    phat = calcular_poblacion_total(
+        comunas,
+        R
+    ) / len(C)
+
+    # Se generan los pares (i,j).
+    Xij = [
+        (i, j)
+        for i in R
+        for j in C
+    ]
+
+    # x[i,j] = 1 si la unidad i pertenece al distrito con centro j.
+    x = model.addVars(
+        Xij,
+        vtype=GRB.BINARY,
+        name="x"
+    )
+
+    model.setObjective(
+        0,
+        GRB.MINIMIZE
+    )
+
+    # Todas las unidades i deben asignarse a exactamente un centro j.
+    for i in R:
+
+        model.addConstr(
+            quicksum(
+                x[i, j]
+                for j in C
+            ) == 1
+        )
+
+    for j in C:
+
+        # Balance superior de población.
+        model.addConstr(
+            quicksum(
+                pob(comunas, i) * x[i, j]
+                for i in R
+            ) <= phat * (1 + epsilon)
+        )
+
+        # Balance inferior de población.
+        model.addConstr(
+            quicksum(
+                pob(comunas, i) * x[i, j]
+                for i in R
+            ) >= phat * (1 - epsilon)
+        )
+
+        # Cada centro debe pertenecer a su propio distrito.
+        model.addConstr(
+            x[j, j] == 1.0
+        )
+
+    # ========================================================
+    # RESTRICCIONES DE CONTIGÜIDAD
+    # ========================================================
+
+    for i in R:
+
+        for j in C:
+
+            aux_s = dict_s[(j, i)]
+
+            while aux_s != [[]]:
+
+                # Claves x[k,j] necesarias para imponer
+                # la restricción de contigüidad.
+                claves_aux = [
+                    (k[0], j)
+                    for k in aux_s
+                ]
+
+                # Si todas las variables necesarias existen,
+                # se agrega la restricción original.
+                if all(
+                    clave in x
+                    for clave in claves_aux
+                ):
+
+                    model.addConstr(
+                        quicksum(
+                            x[clave]
+                            for clave in claves_aux
+                        ) >= x[i, j]
+                    )
+
+                else:
+
+                    # Si el camino requiere una variable que no existe
+                    # en el modelo reducido, se bloquea i -> j.
+                    model.addConstr(
+                        x[i, j] == 0
+                    )
+
+                    # No se puede continuar recorriendo ese camino.
+                    break
+
+                # Se conserva la lógica original para continuar
+                # recorriendo los caminos almacenados en dict_s.
+                k = aux_s[-1]
+
+                aux_s = dict_s[
+                    (j, k[0])
+                ]
+
+    model.optimize()
+
+    end_time = time.time()
+
+    # ========================================================
+    # RESULTADO
+    # ========================================================
+
+    if model.status == GRB.Status.OPTIMAL:
+
+        duration = (
+            end_time
+            - start_time
+        )
+
+        print(
+            f"El código se ejecutó en "
+            f"{duration:.2f} segundos"
+        )
+
+        return model
+
+    try:
+
+        if model.Status == 17:
+            print("FALTA MEMORIA RAM")
+
+        else:
+            print(
+                "Modelo no óptimo. Status:",
+                model.status
+            )
+
+    except Exception:
+
+        print(
+            "Modelo no óptimo. Status:",
+            model.status
+        )
+
+    return None
     
 def modelo_sin_limite(epsilon, R, K, dict_s, comunas):
     model = Model("Modelo Sin Límite")
@@ -1235,7 +1409,7 @@ def modelo_sin_limite_opti(epsilon, R, K, dict_s, comunas):
 
     model.setParam("Method", 2)
     model.setParam("Crossover", 0)
-    model.setParam("Threads", 4)
+    model.setParam("Threads", 8)
     #model.setParam("SoftMemLimit", 15.0)
     model.setParam("OutputFlag", 1)
 
@@ -1348,7 +1522,7 @@ def modelo_sin_limite_opti(epsilon, R, K, dict_s, comunas):
                 if ks_validos:
                     model.addConstr(
                         quicksum(x[k, j] for k in ks_validos) >= x[i, j],
-                        name=f"path[{i},{j}]"
+                        name=f"path[{i},{j},{n_path}]"
                     )
                     n_path += 1
                 else:
@@ -1666,6 +1840,7 @@ def modelo_sin_limite_sparse(
     except:
         print("Modelo no óptimo. Status:", model.status)
     return None
+
 
 
 def modelo_sin_limite_sparse_v2(

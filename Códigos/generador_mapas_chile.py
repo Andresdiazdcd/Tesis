@@ -27,11 +27,20 @@ from data_chile_distrito_censal.chile_data import regiones
 
 CONFIG_CHILE = {
     "region": "chile",
-    "K": 28,
-    "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_B_conectado.xlsx",
-    "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_B_conectado.pkl",
-    "modelo_lp": "datos_modelo/modelo_chile_censal_eps_0.30000_B_sl_v2.lp",
-    "valores_json": "datos_modelo/valores_chile_censal_eps_0.30000_B_sl_v2.json",
+    "K": 22,
+    "comunas": "data_chile_distrito_censal/comunas_chile_2024_caso_A_principal.xlsx",
+    "s_nuevo": "data_chile_distrito_censal/s_nuevo_chile_2024_caso_A_principal_reducido.pkl",
+    "modelo_lp": "datos_modelo/chile_censal_reducido/modelo_K_22_eps_0.05000_B_cl.lp",
+    "valores_json": "datos_modelo/chile_censal_reducido/valores_K_22_eps_0.05000_B_cl.json",
+    "regiones_utilizadas": [
+    "coquimbo",
+    "valparaiso",
+    "metropolitana_de_santiago",
+    "libertador_general_bernardo_ohiggins",
+    "maule",
+    "nuble",
+    "biobio"] #,
+    #"la_araucania"],
 }
 
 # Método de sampleo a usar.
@@ -39,7 +48,7 @@ CONFIG_CHILE = {
 METODOS = ["sys"]
 
 # Epsilons que se probarán para resolver los IP con centros fijos.
-EPSILONS = [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65]
+EPSILONS = [0.05, 0.075, 0.1, 0.15]
 
 # Número de mapas factibles que quieres generar.
 T_MAPAS = 100
@@ -47,10 +56,14 @@ T_MAPAS = 100
 # Tiempo máximo total de la fase 2.
 HORAS = 60
 
+# Si True, descarta sampleos que caen en regiones saturadas.
+# Si False, deja que esos sampleos lleguen normalmente al IP.
+DESCARTAR_POR_SATURACION = False
+
 # Frecuencia de impresión/log.
 LOG_CADA = 50
 
-BASE_RESULTADOS = "resultados_chile_censal"
+BASE_RESULTADOS = "resultados_chile_central"
 os.makedirs(BASE_RESULTADOS, exist_ok=True)
 
 
@@ -85,20 +98,22 @@ def cargar_valores(path):
     return {k.replace(" ", "_"): v for k, v in valores_raw.items()}
 
 
-def centros_fijados_desde_modelo(modelo, valores):
+def centros_fijados_desde_modelo(modelo, valores, tol=1e-5):
     """
-    Extrae los centros que el PL dejó fijados con y_j = 1.
-
-    En tu caso, las variables se llaman:
-        centros_j[dist_...]
-
-    Estos centros ya están decididos por el PL y no entran al sampleo.
+    Extrae los centros que el PL dejó fijados con y_j ≈ 1.
     """
+
     centros = []
 
     for v in modelo.getVars():
-        if v.VarName.startswith("centros_j") and valores.get(v.VarName, 0) == 1.0:
-            comuna = v.VarName[v.VarName.find("[") + 1:v.VarName.find("]")]
+
+        if (
+            v.VarName.startswith("centros_j")
+            and valores.get(v.VarName, 0.0) >= 1.0 - tol
+        ):
+            comuna = v.VarName[
+                v.VarName.find("[") + 1 : v.VarName.find("]")
+            ]
             centros.append(comuna)
 
     return centros
@@ -230,7 +245,7 @@ def buscar_epsilon_minimo_chile(
                 regiones_saturadas
             )
 
-            if cae_saturada:
+            if DESCARTAR_POR_SATURACION and cae_saturada:
                 descartes_region += 1
                 continue
 
@@ -287,36 +302,314 @@ def correr_chile_metodo(config, metodo):
     print(f"CHILE | MÉTODO: {metodo}")
     print("=" * 70)
 
-    comunas = pd.read_excel(config["comunas"])
-    dict_s = cargar_dict_s(config["s_nuevo"])
+        # ========================================================
+    # LECTURA Y FILTRADO DEL SUBCONJUNTO
+    # ========================================================
+
+    comunas_completas = pd.read_excel(
+        config["comunas"]
+    )
+
+    if "comuna" not in comunas_completas.columns:
+        raise ValueError(
+            "El archivo de comunas no contiene la columna 'comuna'."
+        )
+
+    if "region" not in comunas_completas.columns:
+        raise ValueError(
+            "El archivo de comunas no contiene la columna 'region'."
+        )
+
+    # Normalizar identificadores para que coincidan con los nombres
+    # utilizados en el modelo LP y en dict_s.
+    comunas_completas["comuna"] = (
+        comunas_completas["comuna"]
+        .astype(str)
+    )
+
+    regiones_utilizadas = config[
+        "regiones_utilizadas"
+    ]
+
+    regiones_disponibles = set(
+        comunas_completas["region"]
+        .dropna()
+        .unique()
+    )
+
+    regiones_faltantes = (
+        set(regiones_utilizadas)
+        - regiones_disponibles
+    )
+
+    if regiones_faltantes:
+        raise ValueError(
+            "No se encontraron las siguientes regiones "
+            "en el archivo de comunas:\n"
+            f"{sorted(regiones_faltantes)}"
+        )
+
+    # Mantener solamente las regiones utilizadas para resolver la PL.
+    comunas = comunas_completas[
+        comunas_completas["region"].isin(
+            regiones_utilizadas
+        )
+    ].copy()
+
+    comunas.reset_index(
+        drop=True,
+        inplace=True
+    )
+
+    if comunas.empty:
+        raise ValueError(
+            "El filtrado Coquimbo–La Araucanía "
+            "produjo un DataFrame vacío."
+        )
+
+    # ========================================================
+    # CARGA DE CAMINOS DE CONTIGÜIDAD
+    # ========================================================
+
+    dict_s = cargar_dict_s(
+        config["s_nuevo"]
+    )
+
+    # ========================================================
+    # CONSTRUCCIÓN DE R PARA EL SUBCONJUNTO
+    # ========================================================
 
     R_por_region = {}
-    for region in sorted(comunas["region"].unique()):
-        R_por_region[region] = obtener_comunas(comunas, region)
 
-    R = sum(R_por_region.values(), [])
+    for region in regiones_utilizadas:
+
+        R_por_region[region] = obtener_comunas(
+            comunas,
+            region
+        )
+
+    R = sum(
+        R_por_region.values(),
+        []
+    )
+
+    # Normalizar también R como texto.
+    R = [
+        str(unidad)
+        for unidad in R
+    ]
+
+    if len(R) != len(set(R)):
+
+        duplicados = (
+            pd.Series(R)[
+                pd.Series(R).duplicated()
+            ]
+            .unique()
+            .tolist()
+        )
+
+        raise ValueError(
+            "Existen unidades duplicadas en R.\n"
+            f"Primeros duplicados: {duplicados[:20]}"
+        )
+
+    unidades_comunas = set(
+        comunas["comuna"]
+    )
+
+    unidades_R = set(
+        R
+    )
+
+    faltan_en_R = (
+        unidades_comunas
+        - unidades_R
+    )
+
+    sobran_en_R = (
+        unidades_R
+        - unidades_comunas
+    )
+
+    if faltan_en_R or sobran_en_R:
+
+        raise ValueError(
+            "R no coincide exactamente con el subconjunto "
+            "Coquimbo–La Araucanía.\n"
+            f"Faltan en R: {sorted(faltan_en_R)[:20]}\n"
+            f"Sobran en R: {sorted(sobran_en_R)[:20]}"
+        )
+
+    print(
+        "\nRegiones utilizadas:",
+        regiones_utilizadas
+    )
+
+    print(
+        "Cantidad de regiones:",
+        len(regiones_utilizadas)
+    )
+
+    print(
+        "Cantidad de unidades filtradas:",
+        len(comunas)
+    )
+
+    print(
+        "Cantidad de nodos en R:",
+        len(R)
+    )
+
+    # ========================================================
+    # CARGA DE LA SOLUCIÓN DE LA PL
+    # ========================================================
+
     K_centros = config["K"]
 
-    modelo_pl = gp.read(config["modelo_lp"])
-    valores = cargar_valores(config["valores_json"])
+    modelo_pl = gp.read(
+        config["modelo_lp"]
+    )
 
-    _, centros_frac, _ = extraer_prob_centros(modelo_pl, K_centros, valores)
-    centros_fijados = centros_fijados_desde_modelo(modelo_pl, valores)
+    valores = cargar_valores(
+        config["valores_json"]
+    )
 
-    comunas_t, probabilidades = zip(*centros_frac)
-    comunas_t = list(comunas_t)
-    probabilidades = list(probabilidades)
+    _, centros_frac, _ = extraer_prob_centros(
+        modelo_pl,
+        K_centros,
+        valores
+    )
 
-    k_sampleo = K_centros - len(centros_fijados)
+    centros_fijados = centros_fijados_desde_modelo(
+        modelo_pl,
+        valores
+    )
+
+    # Normalizar los identificadores extraídos desde la PL.
+    centros_fijados = [
+        str(centro)
+        for centro in centros_fijados
+    ]
+
+    if centros_frac:
+        comunas_t, probabilidades = zip(
+            *centros_frac
+        )
+
+        comunas_t = [
+            str(comuna)
+            for comuna in comunas_t
+        ]
+
+        probabilidades = [
+            float(probabilidad)
+            for probabilidad in probabilidades
+        ]
+
+    else:
+        comunas_t = []
+        probabilidades = []
+
+    k_sampleo = (
+        K_centros
+        - len(centros_fijados)
+    )
+
+        # ========================================================
+    # VERIFICACIONES DE CONSISTENCIA ENTRE PL Y SUBCONJUNTO
+    # ========================================================
 
     if k_sampleo < 0:
-        raise ValueError("Hay más centros fijados que K.")
+        raise ValueError(
+            "Hay más centros fijados que K."
+        )
 
+    centros_modelo = set(
+        centros_fijados
+    ) | set(
+        comunas_t
+    )
+
+    centros_fuera_R = (
+        centros_modelo
+        - set(R)
+    )
+
+    if centros_fuera_R:
+        raise ValueError(
+            "La PL contiene centros que no pertenecen "
+            "al subconjunto Coquimbo–La Araucanía.\n"
+            f"Primeros centros fuera de R: "
+            f"{sorted(centros_fuera_R)[:30]}"
+        )
+
+    centros_fijados_fuera_R = (
+        set(centros_fijados)
+        - set(R)
+    )
+
+    if centros_fijados_fuera_R:
+        raise ValueError(
+            "Existen centros fijados fuera de R:\n"
+            f"{sorted(centros_fijados_fuera_R)[:30]}"
+        )
+
+    centros_fraccionarios_fuera_R = (
+        set(comunas_t)
+        - set(R)
+    )
+
+    if centros_fraccionarios_fuera_R:
+        raise ValueError(
+            "Existen centros fraccionarios fuera de R:\n"
+            f"{sorted(centros_fraccionarios_fuera_R)[:30]}"
+        )
+
+    if len(centros_fijados) + k_sampleo != K_centros:
+        raise ValueError(
+            "La cantidad de centros no coincide con K.\n"
+            f"Centros fijados: {len(centros_fijados)}\n"
+            f"Centros a samplear: {k_sampleo}\n"
+            f"K: {K_centros}"
+        )
+
+    if k_sampleo > 0 and not comunas_t:
+        raise ValueError(
+            "Faltan centros por seleccionar, pero la PL "
+            "no contiene centros fraccionarios."
+        )
+
+    if k_sampleo > len(comunas_t):
+        raise ValueError(
+            "Se intenta seleccionar más centros que la cantidad "
+            "de candidatos fraccionarios disponibles.\n"
+            f"k_sampleo={k_sampleo}\n"
+            f"candidatos={len(comunas_t)}"
+        )
+
+    suma_probabilidades = sum(
+        probabilidades
+    )
+
+    if abs(suma_probabilidades - k_sampleo) > 1e-5:
+        raise ValueError(
+            "La suma de las probabilidades fraccionarias "
+            "no coincide con la cantidad de centros a samplear.\n"
+            f"Suma probabilidades: {suma_probabilidades}\n"
+            f"k_sampleo: {k_sampleo}"
+        )
+
+    print("\nVerificación PL/subconjunto correcta.")
     print(f"Nodos R: {len(R)}")
     print(f"K: {K_centros}")
     print(f"Centros fijados: {len(centros_fijados)}")
     print(f"Centros a samplear: {k_sampleo}")
     print(f"Centros fraccionarios: {len(comunas_t)}")
+    print(
+        "Suma probabilidades fraccionarias:",
+        suma_probabilidades
+    )
 
     base_resultados = os.path.join(
         BASE_RESULTADOS,
@@ -450,7 +743,7 @@ def correr_chile_metodo(config, metodo):
                 regiones_saturadas
             )
 
-            if cae_saturada:
+            if DESCARTAR_POR_SATURACION and cae_saturada:
                 descartes_region += 1
 
                 with open(ruta_log, "a", encoding="utf-8") as f:

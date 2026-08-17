@@ -74,7 +74,7 @@ def graficar_eeuu_desde_asignaciones_csv(
     plt.savefig(output_png, dpi=300, bbox_inches="tight")
     plt.show()
 
-    return gdf
+    #return gdf
 
 
 def graficar_mapa_eeuu_gurobi(modelo, nodes_geojson, output_png=None, tol=1e-6):
